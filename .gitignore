@@ -1,0 +1,7 @@
+.DS_Store
+.build/
+MenuBarBuddy.app/
+*.xcodeproj/
+xcuserdata/
+DerivedData/
+.swiftpm/
