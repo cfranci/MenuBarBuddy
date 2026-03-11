@@ -130,9 +130,13 @@ struct SettingsView: View {
                 }
             }
 
-            LabeledContent("Hotkey", value: "Ctrl + Opt + Space")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            HStack {
+                Text("Hotkey")
+                Spacer()
+                Text("Ctrl + Opt + Space")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
 
             Spacer()
         }
@@ -142,13 +146,13 @@ struct SettingsView: View {
             endInput = store.selectedEmoji
             startInput = store.startEmoji
         }
-        .onChange(of: endInput) { _, newValue in
+        .onChange(of: endInput) { newValue in
             guard let last = newValue.last else { return }
             let emoji = String(last)
             if emoji != store.selectedEmoji { selectEnd(emoji) }
             if endInput != emoji { endInput = emoji }
         }
-        .onChange(of: startInput) { _, newValue in
+        .onChange(of: startInput) { newValue in
             guard let last = newValue.last else { return }
             let emoji = String(last)
             if emoji != store.startEmoji { selectStart(emoji) }

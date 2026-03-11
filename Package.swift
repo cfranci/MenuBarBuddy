@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "MenuBarBuddy",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v12)],
     dependencies: [
         .package(url: "https://github.com/soffes/HotKey", from: "0.2.0")
     ],
