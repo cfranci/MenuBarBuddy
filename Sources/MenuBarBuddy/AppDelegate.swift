@@ -17,7 +17,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let expandedLength: CGFloat = 20
 
     private var isCollapsed: Bool {
-        return separatorItem.length == collapseLength
+        return separatorItem.length > expandedLength
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -36,7 +36,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateCollapseLength() {
         let screenWidth = NSScreen.main?.visibleFrame.width ?? 1728
-        collapseLength = max(500, min(screenWidth + 200, 4000))
+        collapseLength = max(500, screenWidth * 2.5 * CGFloat(settingsStore.pushMultiplier))
     }
 
     @objc private func screenChanged() {
@@ -161,6 +161,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 if !self.isCollapsed {
                     self.separatorItem.button?.title = emoji
                 }
+            },
+            onPushMultiplierChange: { [weak self] in
+                self?.updateCollapseLength()
             }
         )
         let hostingView = NSHostingView(rootView: settingsView)

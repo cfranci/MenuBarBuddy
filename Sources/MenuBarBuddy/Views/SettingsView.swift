@@ -4,6 +4,7 @@ struct SettingsView: View {
     @ObservedObject var store: SettingsStore
     var onEmojiChange: ((String) -> Void)?
     var onStartEmojiChange: ((String) -> Void)?
+    var onPushMultiplierChange: (() -> Void)?
 
     @State private var endInput: String = ""
     @State private var startInput: String = ""
@@ -112,6 +113,22 @@ struct SettingsView: View {
             .frame(height: 140)
 
             Divider()
+
+            HStack {
+                Button("Still seeing items? Push harder") {
+                    store.pushMultiplier *= 2
+                    onPushMultiplierChange?()
+                }
+                .font(.caption)
+
+                if store.pushMultiplier > 1 {
+                    Button("Reset") {
+                        store.pushMultiplier = 1
+                        onPushMultiplierChange?()
+                    }
+                    .font(.caption)
+                }
+            }
 
             LabeledContent("Hotkey", value: "Ctrl + Opt + Space")
                 .font(.caption)
