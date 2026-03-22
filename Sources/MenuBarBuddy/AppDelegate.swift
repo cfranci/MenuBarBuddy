@@ -51,6 +51,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setupUI() {
+        // Clear any saved positions from previous versions to prevent reboot position swaps
+        UserDefaults.standard.removeObject(forKey: "NSStatusItem Preferred Position mbb3-toggle")
+        UserDefaults.standard.removeObject(forKey: "NSStatusItem Preferred Position mbb3-separator")
+
         // Toggle (📁) — rightmost, always visible, variable width
         if let button = toggleItem.button {
             button.title = settingsStore.selectedEmoji
@@ -58,13 +62,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             button.action = #selector(toggleItemClicked(_:))
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
-        toggleItem.autosaveName = "mbb3-toggle"
 
         // Separator (☰) — to the left of toggle, expands to hide items to its left
         if let button = separatorItem.button {
             button.title = settingsStore.startEmoji
+            button.target = self
+            button.action = #selector(separatorClicked)
+            button.sendAction(on: [.leftMouseUp])
         }
-        separatorItem.autosaveName = "mbb3-separator"
 
         // Start expanded (separator at normal width)
         separatorItem.length = expandedLength
@@ -119,6 +124,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         toggleMenuBar()
     }
 
+    @objc private func separatorClicked() {
+        if isCollapsed {
+            expandMenuBar()
+        }
+    }
+
     private func toggleMenuBar() {
         if isCollapsed {
             expandMenuBar()
@@ -128,11 +139,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func collapseMenuBar() {
-        // Validate separator is to the left of toggle (same check as Hidden Bar)
-        guard let toggleX = toggleItem.button?.window?.frame.origin.x,
-              let separatorX = separatorItem.button?.window?.frame.origin.x,
-              toggleX >= separatorX else { return }
-
         separatorItem.button?.title = ""
         separatorItem.length = collapseLength
     }
