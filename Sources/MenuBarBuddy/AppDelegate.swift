@@ -1,25 +1,46 @@
 import AppKit
 import SwiftUI
 import HotKey
+import ServiceManagement
+import ExceptionShield
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     // Created FIRST = rightmost = always visible (just like Hidden Bar's btnExpandCollapse)
-    private let toggleItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    // (var, not let: the hosting watchdog can recreate them if the menu bar
+    // host orphans them)
+    private var toggleItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     // Created SECOND = to the left of toggle = this expands (just like Hidden Bar's btnSeparate)
-    private let separatorItem = NSStatusBar.system.statusItem(withLength: 1)
+    private var separatorItem = NSStatusBar.system.statusItem(withLength: 1)
 
     private var settingsWindow: NSWindow?
     private var contextMenu: NSMenu!
+    private var startAtLoginMenuItem: NSMenuItem?
     private var hotKey: HotKey?
     private var mouseMonitor: Any?
     private var mouseTimer: Timer?
     private var colorAnimTimer: Timer?
     private var currentDotAlpha: CGFloat = 0.0  // 0 = gray, 1 = green
     private var targetDotAlpha: CGFloat = 0.0
+    private var sigtermSource: DispatchSourceSignal?
+    private var sigintSource: DispatchSourceSignal?
+
+    // Watchdog state (see pollMouseLocation)
+    private var pollTick = 0
+    private var misorderStreak = 0
+    private var parkedStreak = 0
+    private var hostingRecoveryAttempts = 0
+    private var repairAlertShown = false
 
     private let settingsStore = SettingsStore.shared
     private var collapseLength: CGFloat = 2000
     private let expandedLength: CGFloat = 12
+
+    // Preferred positions are distances from the screen's RIGHT edge, so a
+    // smaller value means further right. The toggle must always stay to the
+    // right of the separator (togglePos < separatorPos) or collapsing would
+    // hide the toggle itself with no visible way back.
+    private let togglePositionKey = "NSStatusItem Preferred Position mbb3-toggle"
+    private let separatorPositionKey = "NSStatusItem Preferred Position mbb3-separator"
 
     // Dot colors
     private let greenColor = NSColor(red: 120/255, green: 230/255, blue: 200/255, alpha: 1.0)
@@ -31,11 +52,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // A second instance would register a duplicate set of status items.
+        terminateIfDuplicateInstance()
+
         updateCollapseLength()
         setupUI()
         setupContextMenu()
         setupHotKey()
         setupMouseTracking()
+        setupSignalHandlers()
+        reassertStartAtLogin()
 
         NotificationCenter.default.addObserver(
             self,
@@ -43,11 +69,166 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSApplication.didChangeScreenParametersNotification,
             object: nil
         )
+
+        if CommandLine.arguments.contains("--force-repair") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [self] in
+                performSelfRepair()
+            }
+        }
+        if CommandLine.arguments.contains("--test-collapse") {
+            runCollapseTest()
+        }
+        if CommandLine.arguments.contains("--test-bounce") {
+            setbuf(stdout, nil)
+            func report(_ tag: String) {
+                let tf = toggleItem.button?.window?.frame ?? .zero
+                let sf = separatorItem.button?.window?.frame ?? .zero
+                print("\(tag) toggle=\(Int(tf.origin.x)),\(Int(tf.origin.y)) \(Int(tf.width))w separ=\(Int(sf.origin.x)),\(Int(sf.origin.y)) \(Int(sf.width))w")
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [self] in
+                report("before-bounce:")
+                toggleItem.isVisible = false
+                separatorItem.isVisible = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [self] in
+                    toggleItem.isVisible = true
+                    separatorItem.isVisible = true
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [self] in
+                report("after-bounce:")
+                NSApp.terminate(nil)
+            }
+        }
+        if CommandLine.arguments.contains("--dump-state") {
+            setbuf(stdout, nil)
+            var tick = 0
+            Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [self] _ in
+                tick += 1
+                let tf = toggleItem.button?.window?.frame ?? .zero
+                let sf = separatorItem.button?.window?.frame ?? .zero
+                print("t+\(tick)s toggle: vis=\(toggleItem.isVisible) len=\(Int(toggleItem.length)) frame=\(Int(tf.origin.x)),\(Int(tf.origin.y)) \(Int(tf.width))x\(Int(tf.height)) onScreen=\(toggleItem.button?.window?.isOnActiveSpace ?? false)")
+                print("t+\(tick)s separ:  vis=\(separatorItem.isVisible) len=\(Int(separatorItem.length)) frame=\(Int(sf.origin.x)),\(Int(sf.origin.y)) \(Int(sf.width))x\(Int(sf.height))")
+                if tick >= 5 { NSApp.terminate(nil) }
+            }
+        }
+        if CommandLine.arguments.contains("--test-visual") {
+            setbuf(stdout, nil)
+            print("TEST: launched, collapsing in 4s")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [self] in
+                collapseMenuBar()
+                print("TEST: collapsed, length=\(Int(separatorItem.length)) readback frame=\(separatorItem.button?.window?.frame ?? .zero)")
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [self] in
+                expandMenuBar()
+                print("TEST: expanded")
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 16) {
+                print("TEST: done")
+                NSApp.terminate(nil)
+            }
+        }
+    }
+
+    // MARK: - Lifecycle hardening
+
+    private func terminateIfDuplicateInstance() {
+        guard let bundleID = Bundle.main.bundleIdentifier else { return }
+        let myPID = ProcessInfo.processInfo.processIdentifier
+        let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            .filter { $0.processIdentifier != myPID }
+        if !others.isEmpty {
+            NSApp.terminate(nil)
+        }
+    }
+
+    /// Dying uncleanly while the menu bar host is touching one of our items is
+    /// what gets the bundle ID blacklisted, so turn SIGTERM/SIGINT (pkill,
+    /// Ctrl-C, logout) into a graceful expand-and-quit.
+    private func setupSignalHandlers() {
+        signal(SIGTERM, SIG_IGN)
+        signal(SIGINT, SIG_IGN)
+        sigtermSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        sigtermSource?.setEventHandler { [weak self] in self?.quitApp() }
+        sigtermSource?.resume()
+        sigintSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        sigintSource?.setEventHandler { [weak self] in self?.quitApp() }
+        sigintSource?.resume()
+    }
+
+    // MARK: - Start at Login
+
+    private var startAtLoginEnabled: Bool {
+        SMAppService.mainApp.status == .enabled
+    }
+
+    /// After a self-repair the bundle ID changes, which invalidates the old
+    /// login item registration; re-register if the user had it on.
+    private func reassertStartAtLogin() {
+        guard UserDefaults.standard.bool(forKey: "MenuBarBuddy.startAtLogin"),
+              !startAtLoginEnabled else { return }
+        try? SMAppService.mainApp.register()
+    }
+
+    @objc private func toggleStartAtLogin() {
+        do {
+            if startAtLoginEnabled {
+                try SMAppService.mainApp.unregister()
+                UserDefaults.standard.set(false, forKey: "MenuBarBuddy.startAtLogin")
+            } else {
+                try SMAppService.mainApp.register()
+                UserDefaults.standard.set(true, forKey: "MenuBarBuddy.startAtLogin")
+            }
+        } catch {
+            NSLog("MenuBarBuddy: Start at Login toggle failed: \(error)")
+        }
+        startAtLoginMenuItem?.state = startAtLoginEnabled ? .on : .off
+    }
+
+    // MARK: - Debug test harness (--test-collapse)
+
+    private func dumpStatusWindows(_ tag: String) {
+        guard let list = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] else { return }
+        let items = list.filter { ($0[kCGWindowLayer as String] as? Int) == 25 }
+            .compactMap { w -> String? in
+                guard let b = w[kCGWindowBounds as String] as? [String: CGFloat] else { return nil }
+                let owner = w[kCGWindowOwnerName as String] as? String ?? "?"
+                return "\(owner)@x=\(Int(b["X"] ?? -1)),w=\(Int(b["Width"] ?? -1))"
+            }
+            .sorted()
+        print("TEST[\(tag)] status windows: \(items.joined(separator: " | "))")
+    }
+
+    private func runCollapseTest() {
+        setbuf(stdout, nil)
+        let lengths: [CGFloat] = [12, 100, 500, 1000, 2000, 5000, 10000]
+        print("TEST: macOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
+        print("TEST: screen visibleFrame width = \(NSScreen.main?.visibleFrame.width ?? -1)")
+        dumpStatusWindows("baseline")
+        var delay: TimeInterval = 2
+        for len in lengths {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [self] in
+                separatorItem.button?.attributedTitle = NSAttributedString(string: "")
+                separatorItem.length = len
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [self] in
+                    let readback = separatorItem.length
+                    let frame = separatorItem.button?.window?.frame ?? .zero
+                    print("TEST: set=\(Int(len)) readback=\(Int(readback)) windowFrame=x:\(Int(frame.origin.x)) w:\(Int(frame.width))")
+                    dumpStatusWindows("len\(Int(len))")
+                }
+            }
+            delay += 1.2
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay + 1) {
+            print("TEST: done")
+            NSApp.terminate(nil)
+        }
     }
 
     private func updateCollapseLength() {
+        // macOS 26 (Tahoe) enforces a hard maximum of 10_000 on
+        // NSStatusItem.length and throws NSInvalidArgumentException above it.
         let screenWidth = NSScreen.main?.visibleFrame.width ?? 1728
-        collapseLength = max(500, screenWidth * 2.5 * CGFloat(settingsStore.pushMultiplier))
+        collapseLength = min(10_000, max(500, screenWidth * 2.5 * CGFloat(settingsStore.pushMultiplier)))
     }
 
     @objc private func screenChanged() {
@@ -146,47 +327,116 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             mouseInMenuBar = inMenuBar
             updateDotColor()
         }
+
+        // Piggyback the watchdogs on this timer (0.15s ticks).
+        pollTick += 1
+        if pollTick % 20 == 0 {   // every ~3s: dot dragged into the hidden zone?
+            checkLayoutOrder()
+        }
+        if pollTick % 34 == 0 {   // every ~5s: items still hosted by the menu bar?
+            checkHosting()
+        }
+    }
+
+    /// Proactive version of the collapse guard: if the user drops the dot
+    /// inside the hidden zone, pop it back out within seconds instead of
+    /// waiting for a doomed click. Two consecutive checks with no mouse button
+    /// down, so we never fight an in-progress drag.
+    private func checkLayoutOrder() {
+        guard !isCollapsed, NSEvent.pressedMouseButtons == 0 else {
+            misorderStreak = 0
+            return
+        }
+        if layoutIsSafeToCollapse {
+            misorderStreak = 0
+        } else {
+            misorderStreak += 1
+            if misorderStreak >= 2 {
+                misorderStreak = 0
+                healLayout()
+            }
+        }
     }
 
     // MARK: - UI Setup
 
     private func setupUI() {
-        // Clear any saved positions from previous versions to prevent reboot position swaps
-        UserDefaults.standard.removeObject(forKey: "NSStatusItem Preferred Position mbb3-toggle")
-        UserDefaults.standard.removeObject(forKey: "NSStatusItem Preferred Position mbb3-separator")
-
-        // Toggle (green dot) — rightmost, always visible
-        if let button = toggleItem.button {
-            button.image = makeDotImage(color: grayColor)
-            button.imagePosition = .imageOnly
-            button.title = ""
-            button.target = self
-            button.action = #selector(toggleItemClicked(_:))
-            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        // Without an autosaveName the items persist under generic "Item-0"/"Item-1"
+        // keys. Tahoe's Control Center tracks visibility per key, and a crash can
+        // leave the generic keys marked hidden, vanishing the items on relaunch.
+        // Named keys sidestep that; forcing isVisible reasserts our own entry.
+        // Positions are distances from the screen's right edge. Seed them from the
+        // old bundle's layout (or sane defaults) so the separator sits left of the
+        // toggle with the always-visible zone between; without a seed, fresh items
+        // land at the far left of the status area with nothing left to hide.
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: togglePositionKey) == nil {
+            defaults.set(inheritedPosition(named: togglePositionKey, legacyKey: "NSStatusItem Preferred Position Item-0") ?? 230,
+                         forKey: togglePositionKey)
         }
-
-        // Separator (thin line) — to the left of toggle
-        if let button = separatorItem.button {
-            button.title = "│"
-            button.font = NSFont.systemFont(ofSize: 8, weight: .ultraLight)
-            let style = NSMutableParagraphStyle()
-            style.alignment = .center
-            button.attributedTitle = NSAttributedString(
-                string: "│",
-                attributes: [
-                    .font: NSFont.systemFont(ofSize: 8, weight: .ultraLight),
-                    .foregroundColor: NSColor(white: 1.0, alpha: 0.3),
-                    .paragraphStyle: style
-                ]
-            )
-            button.target = self
-            button.action = #selector(separatorClicked)
-            button.sendAction(on: [.leftMouseUp])
+        if defaults.object(forKey: separatorPositionKey) == nil {
+            defaults.set(inheritedPosition(named: separatorPositionKey, legacyKey: "NSStatusItem Preferred Position Item-1") ?? 388,
+                         forKey: separatorPositionKey)
         }
+        normalizeSavedPositions()
+        bindStatusItems()
+    }
+
+    /// Everything needed to (re)wire the two status items: autosave binding,
+    /// visibility, button config, expanded state. Shared between launch and
+    /// the hosting watchdog's item recreation.
+    private func bindStatusItems() {
+        toggleItem.autosaveName = "mbb3-toggle"
+        separatorItem.autosaveName = "mbb3-separator"
+        toggleItem.isVisible = true
+        separatorItem.isVisible = true
+
+        configureToggleButton()      // green dot — rightmost, always visible
+        configureSeparatorButton()   // thin line — left of toggle
 
         // Start expanded
-        separatorItem.length = expandedLength
+        safelySetLength(expandedLength, on: separatorItem)
         updateDotColor()
+    }
+
+    /// Last-resort recovery when the menu bar host stops hosting our items:
+    /// tear them down and register fresh ones in the original order.
+    private func recreateStatusItems() {
+        NSLog("MenuBarBuddy: recreating status items (hosting watchdog)")
+        NSStatusBar.system.removeStatusItem(toggleItem)
+        NSStatusBar.system.removeStatusItem(separatorItem)
+        toggleItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        separatorItem = NSStatusBar.system.statusItem(withLength: 1)
+        bindStatusItems()
+    }
+
+    private func configureToggleButton() {
+        guard let button = toggleItem.button else { return }
+        button.image = makeDotImage(color: grayColor)
+        button.imagePosition = .imageOnly
+        button.title = ""
+        button.target = self
+        button.action = #selector(toggleItemClicked(_:))
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+    }
+
+    private func configureSeparatorButton() {
+        guard let button = separatorItem.button else { return }
+        button.title = "│"
+        button.font = NSFont.systemFont(ofSize: 8, weight: .ultraLight)
+        let style = NSMutableParagraphStyle()
+        style.alignment = .center
+        button.attributedTitle = NSAttributedString(
+            string: "│",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 8, weight: .ultraLight),
+                .foregroundColor: NSColor(white: 1.0, alpha: 0.3),
+                .paragraphStyle: style
+            ]
+        )
+        button.target = self
+        button.action = #selector(separatorClicked)
+        button.sendAction(on: [.leftMouseUp])
     }
 
     private func setupContextMenu() {
@@ -202,6 +452,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let hotkeyLabel = NSMenuItem(title: "Hotkey: Ctrl+Opt+Space", action: nil, keyEquivalent: "")
         hotkeyLabel.isEnabled = false
         contextMenu.addItem(hotkeyLabel)
+
+        let loginItem = NSMenuItem(title: "Start at Login", action: #selector(toggleStartAtLogin), keyEquivalent: "")
+        loginItem.target = self
+        loginItem.state = startAtLoginEnabled ? .on : .off
+        contextMenu.addItem(loginItem)
+        startAtLoginMenuItem = loginItem
 
         contextMenu.addItem(NSMenuItem.separator())
 
@@ -226,6 +482,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         if event.type == .rightMouseUp {
             updateContextMenuTitle()
+            startAtLoginMenuItem?.state = startAtLoginEnabled ? .on : .off
             toggleItem.menu = contextMenu
             toggleItem.button?.performClick(nil)
             toggleItem.menu = nil
@@ -252,14 +509,122 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // MARK: - Layout guard (the toggle must never sit inside the hidden zone)
+
+    /// Look up a saved menu bar position in previous bundle IDs' domains so an
+    /// ID bump keeps the user's arrangement. Recent domains use the same named
+    /// key; the oldest used the auto-generated Item-N keys.
+    private func inheritedPosition(named key: String, legacyKey: String) -> Double? {
+        for domain in SettingsStore.previousBundleIDs {
+            let lookup = domain == "com.menubarbuddy.app" ? legacyKey : key
+            if let value = CFPreferencesCopyAppValue(lookup as CFString, domain as CFString) as? Double {
+                return value
+            }
+        }
+        return nil
+    }
+
+    /// Repair corrupt or unsafe saved positions before the items restore:
+    /// non-finite/absurd values reset to seeds, and if the toggle would land
+    /// at or left of the separator it is forced back to the far right.
+    private func normalizeSavedPositions() {
+        let defaults = UserDefaults.standard
+        var togglePos = defaults.double(forKey: togglePositionKey)
+        var separatorPos = defaults.double(forKey: separatorPositionKey)
+        let isSane: (Double) -> Bool = { $0.isFinite && $0 >= 0 && $0 <= 5000 }
+        if !isSane(togglePos) {
+            togglePos = 230
+            defaults.set(togglePos, forKey: togglePositionKey)
+        }
+        if !isSane(separatorPos) {
+            separatorPos = 388
+            defaults.set(separatorPos, forKey: separatorPositionKey)
+        }
+        if togglePos >= separatorPos {
+            defaults.set(20, forKey: togglePositionKey)
+            defaults.set(max(separatorPos, 80), forKey: separatorPositionKey)
+        }
+    }
+
+    /// Distance from the right edge of the item's own screen, like the
+    /// "NSStatusItem Preferred Position" defaults. Nil if the item has no window.
+    private func liveDistanceFromRightEdge(_ item: NSStatusItem) -> CGFloat? {
+        guard let window = item.button?.window, let screen = window.screen else { return nil }
+        return screen.frame.maxX - window.frame.maxX
+    }
+
+    /// True when the toggle currently sits to the right of the separator.
+    private var layoutIsSafeToCollapse: Bool {
+        guard let togglePos = liveDistanceFromRightEdge(toggleItem),
+              let separatorPos = liveDistanceFromRightEdge(separatorItem) else { return true }
+        return togglePos < separatorPos
+    }
+
+    /// The user dragged the dot into the hidden zone, where collapsing would
+    /// hide the toggle itself. Fix the saved position and re-insert the dot so
+    /// it jumps back to the safe side. No relaunch: killing the process while
+    /// the menu bar host is mid-manipulation is what gets the bundle ID
+    /// blacklisted (see HANDOFF.md).
+    private func healLayout() {
+        UserDefaults.standard.set(20, forKey: togglePositionKey)
+        toggleItem.isVisible = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [self] in
+            toggleItem.isVisible = true
+            configureToggleButton()
+            updateDotColor()
+        }
+    }
+
+    /// Sets an NSStatusItem length behind the ObjC exception shield. macOS 26
+    /// throws NSInvalidArgumentException above a system cap (10,000 today);
+    /// if Apple ever lowers it, fall back through smaller values instead of
+    /// dying mid-click with the UI half-toggled.
+    @discardableResult
+    private func safelySetLength(_ target: CGFloat, on item: NSStatusItem) -> Bool {
+        for candidate in ([target, 5000, 2500, 1200].filter { $0 <= target }) {
+            if MBBTryCatch({ item.length = candidate }) == nil {
+                return true
+            }
+            NSLog("MenuBarBuddy: setting length \(Int(candidate)) threw; retrying smaller")
+        }
+        return false
+    }
+
     private func collapseMenuBar() {
-        separatorItem.button?.attributedTitle = NSAttributedString(string: "")
-        separatorItem.length = collapseLength
+        guard layoutIsSafeToCollapse else {
+            healLayout()
+            return
+        }
+        // Tahoe clamps the drawn extent of status items that still have
+        // content, which breaks the width-push. The expanded separator must be
+        // a pure spacer: no title, no image, cell disabled (Ice does the same).
+        if let button = separatorItem.button {
+            button.attributedTitle = NSAttributedString(string: "")
+            button.title = ""
+            button.image = nil
+            button.cell?.isEnabled = false
+            button.isHighlighted = false
+        }
+        guard safelySetLength(collapseLength, on: separatorItem) else {
+            // Could not grow at any size; restore the expanded look so the UI
+            // never shows a cleared separator that did nothing.
+            expandMenuBar()
+            return
+        }
         updateDotColor()
+        // Verify the push took: Tahoe has silently ignored large lengths
+        // before. If the separator window never grew, undo cleanly.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [self] in
+            if isCollapsed, let window = separatorItem.button?.window, window.frame.width < 100 {
+                NSLog("MenuBarBuddy: collapse did not take effect; reverting")
+                expandMenuBar()
+            }
+        }
     }
 
     private func expandMenuBar() {
-        separatorItem.length = expandedLength
+        separatorItem.button?.cell?.isEnabled = true
+        safelySetLength(expandedLength, on: separatorItem)
         let style = NSMutableParagraphStyle()
         style.alignment = .center
         separatorItem.button?.attributedTitle = NSAttributedString(
@@ -271,6 +636,86 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             ]
         )
         updateDotColor()
+    }
+
+    // MARK: - Hosting watchdog + self-repair
+
+    /// Signature of the macOS 26 orphaning: the app runs, isVisible is true,
+    /// but the items' windows are parked off-screen (y < 0), screenless, or
+    /// crammed on top of each other at a display edge instead of being laid
+    /// out in the menu bar.
+    private func itemsLookOrphaned() -> Bool {
+        guard !isCollapsed else { return false }   // collapsed geometry is intentionally weird
+        guard let toggleWindow = toggleItem.button?.window,
+              let separatorWindow = separatorItem.button?.window else { return true }
+        if toggleWindow.screen == nil || separatorWindow.screen == nil { return true }
+        if toggleWindow.frame.origin.y < 0 || separatorWindow.frame.origin.y < 0 { return true }
+        if toggleWindow.frame.intersects(separatorWindow.frame) { return true }
+        return false
+    }
+
+    /// Escalating recovery: three consecutive positives (~15s) to rule out
+    /// transient states, then recreate the items in-process (twice max), then
+    /// offer the bundle-ID self-repair once.
+    private func checkHosting() {
+        guard itemsLookOrphaned() else {
+            parkedStreak = 0
+            return
+        }
+        parkedStreak += 1
+        guard parkedStreak >= 3 else { return }
+        parkedStreak = 0
+        if hostingRecoveryAttempts < 2 {
+            hostingRecoveryAttempts += 1
+            recreateStatusItems()
+        } else if !repairAlertShown {
+            repairAlertShown = true
+            showRepairAlert()
+        }
+    }
+
+    private func showRepairAlert() {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "MenuBarBuddy's icons are being blocked"
+        alert.informativeText = "macOS blocked this copy of the app after an unclean shutdown (this happens if the app is force-killed while the menu bar is busy). Repair re-registers the app under a fresh identity and relaunches it. Your settings and icon positions are kept."
+        alert.addButton(withTitle: "Repair and Relaunch")
+        alert.addButton(withTitle: "Later")
+        let response = alert.runModal()
+        NSApp.setActivationPolicy(.accessory)
+        if response == .alertFirstButtonReturn {
+            performSelfRepair()
+        }
+    }
+
+    /// The blacklist is keyed on the bundle ID and survives relaunches and
+    /// Control Center restarts; the only known escape is a fresh ID. Bump our
+    /// own CFBundleIdentifier (v4 -> v5 -> ...), re-sign, and relaunch. The
+    /// settings/position migration picks the old domain up automatically.
+    private func performSelfRepair() {
+        guard let bundleID = Bundle.main.bundleIdentifier else { return }
+        let bundlePath = Bundle.main.bundlePath
+        let plistPath = bundlePath + "/Contents/Info.plist"
+        guard let data = FileManager.default.contents(atPath: plistPath),
+              var plist = (try? PropertyListSerialization.propertyList(from: data, options: [], format: nil)) as? [String: Any] else {
+            NSLog("MenuBarBuddy: self-repair failed to read Info.plist")
+            return
+        }
+        plist["CFBundleIdentifier"] = SettingsStore.nextBundleID(after: bundleID)
+        guard let output = try? PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0),
+              (try? output.write(to: URL(fileURLWithPath: plistPath))) != nil else {
+            NSLog("MenuBarBuddy: self-repair failed to write Info.plist")
+            return
+        }
+        // Re-sign and relaunch after this process has fully exited (a running
+        // binary cannot be re-signed in place).
+        let script = "sleep 1; /usr/bin/codesign --force -s - \"\(bundlePath)\"; sleep 1; /usr/bin/open \"\(bundlePath)\""
+        let relauncher = Process()
+        relauncher.launchPath = "/bin/sh"
+        relauncher.arguments = ["-c", script]
+        try? relauncher.run()
+        NSApp.terminate(nil)
     }
 
     // MARK: - Settings

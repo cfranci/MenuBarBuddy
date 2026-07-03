@@ -32,15 +32,19 @@ Right-click 📁 → **Choose Icons...** to:
 
 ## Requirements
 
-- macOS 14+
+- macOS 14+ (verified on macOS 26 Tahoe)
 
 ## Building
 
 ```bash
-swift build
-cp .build/debug/MenuBarBuddy MenuBarBuddy.app/Contents/MacOS/MenuBarBuddy
-open MenuBarBuddy.app
+./install.sh
 ```
+
+Builds a release binary, assembles `/Applications/MenuBarBuddy.app` from
+`Support/Info.plist`, codesigns, and relaunches.
+
+> macOS 26 note: `NSStatusItem.length` is hard-capped at 10,000 and throws
+> above it. See HANDOFF.md for the full Tahoe compatibility story.
 
 ## Dependencies
 
