@@ -18,6 +18,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var rainbowDotMenuItem: NSMenuItem?
     private var rainbowTimer: Timer?
     private var rainbowHue: CGFloat = 0.45  // start near the classic mint
+    private var rainbowWavePhase: CGFloat = 0
     private var hotKey: HotKey?
     private var mouseMonitor: Any?
     private var mouseTimer: Timer?
@@ -285,6 +286,58 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return img
     }
 
+    /// Two-tone rainbow dot: one hue on top, another below, blended along a
+    /// wavy boundary that drifts through the middle. Rendered per-pixel into a
+    /// small retina bitmap (36x36 px, trivial at 20fps).
+    private func makeWaveDotImage(topColor: NSColor, bottomColor: NSColor, wavePhase: CGFloat, size: CGFloat = 18) -> NSImage {
+        let scale: CGFloat = 2
+        let px = Int(size * scale)
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: px, pixelsHigh: px,
+                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                         isPlanar: false, colorSpaceName: .deviceRGB,
+                                         bytesPerRow: 0, bitsPerPixel: 0),
+              let top = topColor.usingColorSpace(.deviceRGB),
+              let bottom = bottomColor.usingColorSpace(.deviceRGB),
+              let bytes = rep.bitmapData else {
+            return makeDotImage(color: topColor, size: size)
+        }
+        let dotRadius = 4.5 * scale               // same 9pt dot as the classic image
+        let center = CGFloat(px) / 2
+        let amplitude = dotRadius * 0.35          // wave height
+        let blendBand = dotRadius * 0.9           // soft gradient thickness
+        let bytesPerRow = rep.bytesPerRow
+        let (tr, tg, tb) = (top.redComponent, top.greenComponent, top.blueComponent)
+        let (br, bg, bb) = (bottom.redComponent, bottom.greenComponent, bottom.blueComponent)
+        for y in 0..<px {
+            for x in 0..<px {
+                let dx = CGFloat(x) + 0.5 - center
+                let dy = CGFloat(y) + 0.5 - center    // positive = below center (bitmap is top-down)
+                let dist = (dx * dx + dy * dy).squareRoot()
+                let alpha = max(0, min(1, dotRadius - dist + 0.5))   // 1px antialiased rim
+                let offset = y * bytesPerRow + x * 4
+                if alpha <= 0 {
+                    bytes[offset] = 0; bytes[offset + 1] = 0; bytes[offset + 2] = 0; bytes[offset + 3] = 0
+                    continue
+                }
+                // Wavy boundary: crosses the middle, drifting with wavePhase.
+                let wave = amplitude * sin((dx / dotRadius) * .pi * 1.4 + wavePhase)
+                var t = (dy - wave) / blendBand + 0.5                // 0 = top color, 1 = bottom
+                t = max(0, min(1, t))
+                t = t * t * (3 - 2 * t)                              // smoothstep
+                let r = tr + (br - tr) * t
+                let g = tg + (bg - tg) * t
+                let b = tb + (bb - tb) * t
+                bytes[offset]     = UInt8(r * alpha * 255)           // premultiplied RGBA
+                bytes[offset + 1] = UInt8(g * alpha * 255)
+                bytes[offset + 2] = UInt8(b * alpha * 255)
+                bytes[offset + 3] = UInt8(alpha * 255)
+            }
+        }
+        let img = NSImage(size: NSSize(width: size, height: size))
+        img.addRepresentation(rep)
+        return img
+    }
+
     // MARK: - Rainbow dot (optional mode)
 
     private var rainbowEnabled: Bool {
@@ -321,8 +374,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let saturation = 0.15 + 0.75 * currentDotAlpha
         let brightness = 0.55 + 0.45 * currentDotAlpha
-        let color = NSColor(hue: rainbowHue, saturation: saturation, brightness: brightness, alpha: 1.0)
-        toggleItem.button?.image = makeDotImage(color: color)
+        // Two hues a third of the wheel apart, top and bottom, blended along a
+        // wave that drifts through the middle (~one sweep every 4 seconds).
+        rainbowWavePhase = (rainbowWavePhase + 0.05 * 2 * .pi / 4).truncatingRemainder(dividingBy: 2 * .pi)
+        let bottomHue = (rainbowHue + 0.33).truncatingRemainder(dividingBy: 1.0)
+        let topColor = NSColor(hue: rainbowHue, saturation: saturation, brightness: brightness, alpha: 1.0)
+        let bottomColor = NSColor(hue: bottomHue, saturation: saturation, brightness: brightness, alpha: 1.0)
+        toggleItem.button?.image = makeWaveDotImage(topColor: topColor, bottomColor: bottomColor, wavePhase: rainbowWavePhase)
     }
 
     @objc private func toggleRainbowDot() {

@@ -20,11 +20,14 @@ pass followed; current bundle ID is **com.menubarbuddy.v6**.
 ## Rainbow Dot (optional mode, currently ON)
 
 Right-click the dot → "Rainbow Dot" to toggle (persisted as
-`MenuBarBuddy.rainbowDot`, migrates across bundle IDs). Hue phases through a
-full cycle every ~8s at 20fps. Vividness follows the classic rule: saturated
-and bright when expanded or hovered (sat 0.90 / bright 1.0), grayed out when
-collapsed and idle (sat 0.15 / bright 0.55), eased over ~0.8s. Classic
-green/gray mode is the default when the option is off.
+`MenuBarBuddy.rainbowDot`, migrates across bundle IDs). The dot is TWO-TONE:
+one hue on top, a second hue (a third of the wheel away) below, blended along
+a wavy boundary that drifts through the middle (~one sweep every 4s, rendered
+per-pixel in `makeWaveDotImage`, 36x36 retina bitmap at 20fps). Both hues
+phase through a full cycle every ~8s. Vividness follows the classic rule:
+saturated and bright when expanded or hovered (sat 0.90 / bright 1.0), grayed
+out when collapsed and idle (sat 0.15 / bright 0.55), eased over ~0.8s.
+Classic green/gray mode is the default when the option is off.
 
 ## Hardening pass (all live-tested unless noted)
 
