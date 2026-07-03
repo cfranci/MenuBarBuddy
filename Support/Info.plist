@@ -7,7 +7,7 @@
 	<key>CFBundleExecutable</key>
 	<string>MenuBarBuddy</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.menubarbuddy.v5</string>
+	<string>com.menubarbuddy.v6</string>
 	<key>CFBundleName</key>
 	<string>MenuBarBuddy</string>
 	<key>CFBundlePackageType</key>

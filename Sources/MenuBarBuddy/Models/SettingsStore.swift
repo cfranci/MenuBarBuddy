@@ -57,7 +57,8 @@ class SettingsStore: ObservableObject {
         let migratedKey = "MenuBarBuddy.migratedSettings"
         guard !defaults.bool(forKey: migratedKey) else { return }
         for key in ["MenuBarBuddy.selectedEmoji", "MenuBarBuddy.startEmoji",
-                    "MenuBarBuddy.pushMultiplier", "MenuBarBuddy.startAtLogin"] {
+                    "MenuBarBuddy.pushMultiplier", "MenuBarBuddy.startAtLogin",
+                    "MenuBarBuddy.rainbowDot"] {
             guard defaults.object(forKey: key) == nil else { continue }
             for domain in previousBundleIDs {
                 if let value = CFPreferencesCopyAppValue(key as CFString, domain as CFString) {

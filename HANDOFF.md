@@ -5,7 +5,26 @@
 
 The March collapse bug is fixed and verified end-to-end on the installed app
 (hotkey toggle, screenshot-verified hide/restore across displays). A hardening
-pass followed; current bundle ID is **com.menubarbuddy.v5**.
+pass followed; current bundle ID is **com.menubarbuddy.v6**.
+
+## Menu bar arrangement (as of close, July 3 2026)
+
+- **Hidden zone** (left of │, hides on collapse): dictation mic pill (system,
+  transient), Docker whale (with ! badge), waveform icon, dot-grid icon,
+  Wi-Fi, keyboard/input switcher.
+- **Always visible** (right of the dot): weather (cloud + °F), play button,
+  battery %, screen-mirroring pill (purple when active), Control Center
+  toggles, clock. The dot sits immediately right of │ (separator 380pt /
+  toggle 346pt from the right edge; the between-zone is currently empty).
+
+## Rainbow Dot (optional mode, currently ON)
+
+Right-click the dot → "Rainbow Dot" to toggle (persisted as
+`MenuBarBuddy.rainbowDot`, migrates across bundle IDs). Hue phases through a
+full cycle every ~8s at 20fps. Vividness follows the classic rule: saturated
+and bright when expanded or hovered (sat 0.90 / bright 1.0), grayed out when
+collapsed and idle (sat 0.15 / bright 0.55), eased over ~0.8s. Classic
+green/gray mode is the default when the option is off.
 
 ## Hardening pass (all live-tested unless noted)
 
@@ -18,14 +37,19 @@ pass followed; current bundle ID is **com.menubarbuddy.v5**.
   never grew, the app reverts to the expanded look so the UI never lies.
 - **Hosting watchdog**: every ~5s the app checks for the orphaning signature
   (item windows parked at y<0, screenless, or overlapping at a display edge).
-  Three consecutive positives → recreate the status items in-process (twice
-  max) → then a one-time alert offering **Repair and Relaunch**.
+  Works in BOTH states: the toggle is checked even while collapsed (an early
+  version skipped collapsed state and went blind — fixed). Three consecutive
+  positives → recreate the status items in-process (twice max) → then a
+  one-time alert offering **Repair and Relaunch**. LIVE-FIRE TESTED: a debug
+  harness accidentally died while collapsed, blacklisting v5; the watchdog
+  detected it, ran both recreations, and raised the alert on its own.
 - **Self-repair** (`performSelfRepair`, also `--force-repair` flag): bumps its
   own CFBundleIdentifier (v5 → v6 → ...), re-signs ad hoc, relaunches; the
   settings/position migration follows the domain chain automatically
   (`SettingsStore.previousBundleIDs` is derived from the current ID). Tested
-  live: v4 → v5 worked end to end. **After a self-repair, sync
-  `Support/Info.plist` to the new ID** or install.sh will revert it.
+  live twice: v4 → v5 and v5 → v6 both worked end to end. **After a
+  self-repair, sync `Support/Info.plist` to the new ID** or install.sh will
+  revert it.
 - **Proactive layout guard**: the mouse-poll timer checks every ~3s (when no
   mouse button is down) that the dot is right of the separator; two consecutive
   misorders → the dot pops back to the far right. No more self-hiding, even
@@ -122,7 +146,9 @@ made the March bug look timing-dependent.
   app now detects it and offers Repair itself within ~1 minute. Manual
   fallback: run the app with `--force-repair`, then sync `Support/Info.plist`
   to the new bundle ID. Reboot may also clear the blacklist (untested).
-- Never kill/restart the app while a menu bar item is being dragged.
+- Never kill/restart the app while a menu bar item is being dragged, and
+  never terminate while collapsed (debug harnesses exit via quitApp(), which
+  expands first — killing mid-push is how v5 died).
 - The dictation/screen-recording pills are system indicators; they sit in the
   pushed zone and hide/restore with the rest. Normal.
 - macOS 26 spacing knobs if the bar gets crowded:

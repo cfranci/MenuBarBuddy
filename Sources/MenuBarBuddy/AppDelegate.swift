@@ -15,6 +15,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindow: NSWindow?
     private var contextMenu: NSMenu!
     private var startAtLoginMenuItem: NSMenuItem?
+    private var rainbowDotMenuItem: NSMenuItem?
+    private var rainbowTimer: Timer?
+    private var rainbowHue: CGFloat = 0.45  // start near the classic mint
     private var hotKey: HotKey?
     private var mouseMonitor: Any?
     private var mouseTimer: Timer?
@@ -96,7 +99,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [self] in
                 report("after-bounce:")
-                NSApp.terminate(nil)
+                quitApp()
+            }
+        }
+        if CommandLine.arguments.contains("--rainbow-debug") {
+            setbuf(stdout, nil)
+            var tick = 0
+            Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [self] _ in
+                tick += 1
+                print("t+\(tick)s rainbowOn=\(rainbowEnabled) timer=\(rainbowTimer != nil) collapsed=\(isCollapsed) mouseInBar=\(mouseInMenuBar) alpha=\(String(format: "%.2f", currentDotAlpha)) hue=\(String(format: "%.2f", rainbowHue)) len=\(Int(separatorItem.length))")
+                if tick >= 12 { quitApp() }
             }
         }
         if CommandLine.arguments.contains("--dump-state") {
@@ -108,7 +120,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 let sf = separatorItem.button?.window?.frame ?? .zero
                 print("t+\(tick)s toggle: vis=\(toggleItem.isVisible) len=\(Int(toggleItem.length)) frame=\(Int(tf.origin.x)),\(Int(tf.origin.y)) \(Int(tf.width))x\(Int(tf.height)) onScreen=\(toggleItem.button?.window?.isOnActiveSpace ?? false)")
                 print("t+\(tick)s separ:  vis=\(separatorItem.isVisible) len=\(Int(separatorItem.length)) frame=\(Int(sf.origin.x)),\(Int(sf.origin.y)) \(Int(sf.width))x\(Int(sf.height))")
-                if tick >= 5 { NSApp.terminate(nil) }
+                if tick >= 5 { quitApp() }
             }
         }
         if CommandLine.arguments.contains("--test-visual") {
@@ -122,9 +134,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 expandMenuBar()
                 print("TEST: expanded")
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 16) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 16) { [self] in
                 print("TEST: done")
-                NSApp.terminate(nil)
+                quitApp()
             }
         }
     }
@@ -218,9 +230,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             delay += 1.2
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay + 1) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay + 1) { [self] in
             print("TEST: done")
-            NSApp.terminate(nil)
+            quitApp()
         }
     }
 
@@ -273,7 +285,59 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return img
     }
 
+    // MARK: - Rainbow dot (optional mode)
+
+    private var rainbowEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "MenuBarBuddy.rainbowDot") }
+        set { UserDefaults.standard.set(newValue, forKey: "MenuBarBuddy.rainbowDot") }
+    }
+
+    private func startRainbowIfNeeded() {
+        guard rainbowTimer == nil else { return }
+        colorAnimTimer?.invalidate()
+        colorAnimTimer = nil
+        rainbowTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+            self?.rainbowTick()
+        }
+    }
+
+    private func stopRainbow() {
+        rainbowTimer?.invalidate()
+        rainbowTimer = nil
+    }
+
+    private func rainbowTick() {
+        // Full hue cycle roughly every 8 seconds.
+        rainbowHue = (rainbowHue + 0.05 / 8.0).truncatingRemainder(dividingBy: 1.0)
+        // Same vividness rule as the classic dot: vivid when expanded or
+        // hovered, grayed out when collapsed and idle. currentDotAlpha eases
+        // between the two so state changes fade instead of snapping.
+        let target: CGFloat = (!isCollapsed || mouseInMenuBar) ? 1.0 : 0.0
+        let step: CGFloat = 0.06
+        if currentDotAlpha < target {
+            currentDotAlpha = min(currentDotAlpha + step, target)
+        } else if currentDotAlpha > target {
+            currentDotAlpha = max(currentDotAlpha - step, target)
+        }
+        let saturation = 0.15 + 0.75 * currentDotAlpha
+        let brightness = 0.55 + 0.45 * currentDotAlpha
+        let color = NSColor(hue: rainbowHue, saturation: saturation, brightness: brightness, alpha: 1.0)
+        toggleItem.button?.image = makeDotImage(color: color)
+    }
+
+    @objc private func toggleRainbowDot() {
+        rainbowEnabled.toggle()
+        rainbowDotMenuItem?.state = rainbowEnabled ? .on : .off
+        if !rainbowEnabled { stopRainbow() }
+        updateDotColor()
+    }
+
     private func updateDotColor() {
+        if rainbowEnabled {
+            startRainbowIfNeeded()
+            return
+        }
+        stopRainbow()
         // Green if expanded (not collapsed) OR mouse is hovering over menu bar
         // Gray if collapsed and mouse is not in menu bar
         let shouldBeGreen = !isCollapsed || mouseInMenuBar
@@ -459,6 +523,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         contextMenu.addItem(loginItem)
         startAtLoginMenuItem = loginItem
 
+        let rainbowItem = NSMenuItem(title: "Rainbow Dot", action: #selector(toggleRainbowDot), keyEquivalent: "")
+        rainbowItem.target = self
+        rainbowItem.state = rainbowEnabled ? .on : .off
+        contextMenu.addItem(rainbowItem)
+        rainbowDotMenuItem = rainbowItem
+
         contextMenu.addItem(NSMenuItem.separator())
 
         let quitItem = NSMenuItem(title: "Quit MenuBarBuddy", action: #selector(quitApp), keyEquivalent: "q")
@@ -483,6 +553,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if event.type == .rightMouseUp {
             updateContextMenuTitle()
             startAtLoginMenuItem?.state = startAtLoginEnabled ? .on : .off
+            rainbowDotMenuItem?.state = rainbowEnabled ? .on : .off
             toggleItem.menu = contextMenu
             toggleItem.button?.performClick(nil)
             toggleItem.menu = nil
@@ -645,11 +716,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// crammed on top of each other at a display edge instead of being laid
     /// out in the menu bar.
     private func itemsLookOrphaned() -> Bool {
-        guard !isCollapsed else { return false }   // collapsed geometry is intentionally weird
-        guard let toggleWindow = toggleItem.button?.window,
-              let separatorWindow = separatorItem.button?.window else { return true }
-        if toggleWindow.screen == nil || separatorWindow.screen == nil { return true }
-        if toggleWindow.frame.origin.y < 0 || separatorWindow.frame.origin.y < 0 { return true }
+        // The toggle dot must be sanely hosted in EVERY state (only the
+        // separator's geometry is intentionally weird while collapsed). This
+        // must not skip collapsed state: an orphaned separator still accepts a
+        // 10,000 length, so a blind-while-collapsed watchdog never fires.
+        guard let toggleWindow = toggleItem.button?.window else { return true }
+        if toggleWindow.screen == nil { return true }
+        if toggleWindow.frame.origin.y < 0 { return true }
+        guard !isCollapsed else { return false }
+        guard let separatorWindow = separatorItem.button?.window else { return true }
+        if separatorWindow.screen == nil { return true }
+        if separatorWindow.frame.origin.y < 0 { return true }
         if toggleWindow.frame.intersects(separatorWindow.frame) { return true }
         return false
     }

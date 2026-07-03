@@ -24,6 +24,11 @@ To keep certain items **always visible**, Cmd-drag them to be **between** ☰ an
 
 ## Customization
 
+Right-click the dot → **Rainbow Dot** to make it phase through the color
+wheel (~8s per cycle): grayed out while collapsed and idle, vivid on hover or
+when expanded. Right-click → **Start at Login** to keep it running after
+reboots.
+
 Right-click 📁 → **Choose Icons...** to:
 
 - Change either icon to any emoji or symbol
