@@ -1,0 +1,880 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>MenuBarBuddy: Hide your Mac menu bar clutter for $4.20</title>
+<meta name="description" content="A tiny, fast Mac menu bar tidier. Click one small green dot to hide the icons you do not need. Global hotkey, two-tone rainbow dot, and a self-healing watchdog built for macOS 26 Tahoe. One time $4.20. No subscription." />
+<link rel="canonical" href="https://cfranci.github.io/MenuBarBuddy" />
+
+<!-- Open Graph -->
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="MenuBarBuddy" />
+<meta property="og:title" content="MenuBarBuddy: a tidy Mac menu bar for $4.20" />
+<meta property="og:description" content="Click one small green dot to hide your menu bar clutter. Hotkey, two-tone rainbow dot, self-healing on macOS 26 Tahoe. One time $4.20, no subscription." />
+<meta property="og:url" content="https://cfranci.github.io/MenuBarBuddy" />
+<meta property="og:image" content="assets/og.png" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+
+<!-- Twitter -->
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="MenuBarBuddy: a tidy Mac menu bar for $4.20" />
+<meta name="twitter:description" content="Click one small green dot to hide your menu bar clutter. Hotkey, two-tone rainbow dot, self-healing on macOS 26 Tahoe. One time $4.20, no subscription." />
+<meta name="twitter:image" content="assets/og.png" />
+
+<meta name="theme-color" content="#0a0a0c" />
+
+<!-- Inline SVG favicon: a green dot next to a separator, the app's signature -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230a0a0c'/%3E%3Crect x='26' y='16' width='4' height='32' rx='2' fill='%236b6b72'/%3E%3Ccircle cx='42' cy='32' r='9' fill='%2334c759'/%3E%3C/svg%3E" />
+
+<style>
+  :root {
+    --bg: #0a0a0c;
+    --bg-2: #121216;
+    --surface: rgba(255, 255, 255, 0.04);
+    --surface-2: rgba(255, 255, 255, 0.06);
+    --border: rgba(255, 255, 255, 0.08);
+    --border-strong: rgba(255, 255, 255, 0.14);
+    --text: #f2f2f5;
+    --text-dim: #a0a0a8;
+    --text-faint: #6c6c74;
+    --green: #34c759;      /* Apple system green, matches the real app dot */
+    --green-soft: #7cf0a3;
+    --blue: #0a84ff;
+    --pink: #ff375f;
+    --radius: 16px;
+    --shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+    --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+  body {
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow-x: hidden;
+  }
+
+  /* Ambient background glow */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    background:
+      radial-gradient(900px 500px at 70% -5%, rgba(52, 199, 89, 0.10), transparent 60%),
+      radial-gradient(700px 500px at 10% 10%, rgba(10, 132, 255, 0.08), transparent 55%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  a { color: inherit; text-decoration: none; }
+
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; position: relative; z-index: 1; }
+
+  h1, h2, h3 { font-family: var(--font-display); letter-spacing: -0.02em; line-height: 1.1; }
+
+  /* ---------- NAV ---------- */
+  nav {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    background: rgba(10, 10, 12, 0.72);
+    border-bottom: 1px solid var(--border);
+  }
+  .nav-inner { display: flex; align-items: center; justify-content: space-between; height: 58px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-family: var(--font-display); font-weight: 600; font-size: 16px; }
+  .brand .sep { width: 3px; height: 18px; border-radius: 2px; background: var(--text-faint); }
+  .brand .dot { width: 14px; height: 14px; border-radius: 50%; background: var(--green); box-shadow: 0 0 12px rgba(52, 199, 89, 0.6); }
+  .nav-links { display: flex; align-items: center; gap: 26px; font-size: 14px; color: var(--text-dim); }
+  .nav-links a:hover { color: var(--text); }
+  .nav-buy {
+    background: var(--green);
+    color: #052b10 !important;
+    font-weight: 640;
+    padding: 8px 16px;
+    border-radius: 10px;
+    font-size: 14px;
+  }
+  .nav-buy:hover { filter: brightness(1.06); }
+  @media (max-width: 720px) { .nav-links a:not(.nav-buy) { display: none; } }
+
+  /* ---------- HERO ---------- */
+  header.hero { padding: 88px 0 40px; text-align: center; }
+  .price-badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--surface); border: 1px solid var(--border-strong);
+    color: var(--text-dim); font-size: 13px; font-weight: 500;
+    padding: 6px 14px; border-radius: 999px; margin-bottom: 26px;
+  }
+  .price-badge b { color: var(--green); font-weight: 700; }
+  .hero h1 { font-size: clamp(40px, 7vw, 68px); font-weight: 700; }
+  .hero h1 .accent {
+    background: linear-gradient(120deg, var(--green), var(--green-soft));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .hero p.sub { max-width: 640px; margin: 22px auto 0; font-size: clamp(17px, 2.4vw, 20px); color: var(--text-dim); }
+  .hero-cta { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; margin-top: 34px; }
+  .btn-primary {
+    background: var(--green); color: #052b10; font-weight: 660; font-size: 16px;
+    padding: 14px 28px; border-radius: 12px; box-shadow: 0 8px 24px rgba(52, 199, 89, 0.28);
+    transition: transform 0.15s ease, filter 0.15s ease;
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  .btn-primary:hover { transform: translateY(-1px); filter: brightness(1.05); }
+  .btn-ghost {
+    background: var(--surface); color: var(--text); font-weight: 560; font-size: 16px;
+    padding: 14px 24px; border-radius: 12px; border: 1px solid var(--border-strong);
+  }
+  .btn-ghost:hover { background: var(--surface-2); }
+  .hero-note { margin-top: 16px; font-size: 13px; color: var(--text-faint); }
+
+  /* ---------- LIVE MENU BAR DEMO ---------- */
+  .demo-shell {
+    margin: 54px auto 0; max-width: 900px;
+    border-radius: 22px; padding: 2px;
+    background: linear-gradient(160deg, rgba(255,255,255,0.14), rgba(255,255,255,0.02));
+    box-shadow: var(--shadow);
+  }
+  .demo-window {
+    background: linear-gradient(180deg, #1b2430 0%, #10161e 55%, #0c1016 100%);
+    border-radius: 20px; overflow: hidden; position: relative;
+  }
+  /* macOS menu bar strip */
+  .menubar {
+    height: 34px; display: flex; align-items: center; justify-content: space-between;
+    padding: 0 14px;
+    background: rgba(10, 12, 16, 0.55);
+    backdrop-filter: blur(30px); -webkit-backdrop-filter: blur(30px);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    font-size: 13px; color: #e9e9ee;
+    position: relative; z-index: 3;
+  }
+  .mb-left { display: flex; align-items: center; gap: 18px; font-weight: 600; }
+  .mb-left .apple { font-size: 15px; }
+  .mb-left .app-menus { display: flex; gap: 16px; color: #d4d4da; font-weight: 500; }
+  @media (max-width: 620px) { .mb-left .app-menus { display: none; } }
+  .mb-right { display: flex; align-items: center; gap: 4px; }
+
+  .status-item {
+    display: inline-flex; align-items: center; justify-content: center;
+    height: 24px; min-width: 22px; padding: 0 5px; border-radius: 6px;
+    color: #e9e9ee;
+    transition: opacity 0.45s cubic-bezier(0.4, 0, 0.2, 1),
+                transform 0.45s cubic-bezier(0.4, 0, 0.2, 1),
+                margin 0.45s cubic-bezier(0.4, 0, 0.2, 1),
+                max-width 0.45s cubic-bezier(0.4, 0, 0.2, 1);
+    max-width: 60px; overflow: hidden; white-space: nowrap;
+  }
+  .status-item svg { display: block; }
+  /* Items that live LEFT of the separator = the hidden zone */
+  .hideable { transform-origin: right center; }
+
+  /* the separator glyph, matches the app default "│" pipe */
+  .sep-item {
+    width: 3px; height: 16px; border-radius: 2px; margin: 0 4px;
+    background: rgba(255, 255, 255, 0.34); flex: none;
+  }
+  /* the toggle: always a small round dot; solid green by default (the shipped default), two-tone rainbow in Rainbow mode */
+  .toggle-item {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 22px; height: 22px; margin: 0 6px 0 4px; border-radius: 6px;
+    cursor: pointer; flex: none; font-size: 15px; line-height: 1;
+    transition: transform 0.15s ease, background 0.5s ease, box-shadow 0.3s ease, filter 0.5s ease;
+  }
+  .toggle-item:hover { transform: scale(1.12); }
+  .toggle-item:active { transform: scale(0.94); }
+
+  /* Classic dot: solid Apple system green, matches the real app */
+  .toggle-item .dot {
+    display: block;
+    width: 15px; height: 15px; border-radius: 50%;
+    background: var(--green);
+    box-shadow: none;
+    transition: filter 0.5s ease;
+  }
+
+  /* Rainbow dot: two-tone dot with a drifting wavy boundary,
+     approximating the app's makeWaveDotImage (two hues a third of the wheel apart) */
+  .toggle-item.rainbow .dot {
+    background: linear-gradient(160deg, #ff5f6d 0%, #ff5f6d 42%, #4fc3f7 58%, #4fc3f7 100%);
+    background-size: 100% 200%;
+    animation: hue 8s linear infinite, wave 4s ease-in-out infinite;
+  }
+  @keyframes hue { to { filter: hue-rotate(360deg); } }
+  @keyframes wave {
+    0%, 100% { background-position: 0% 40%; }
+    50% { background-position: 0% 60%; }
+  }
+
+  /* COLLAPSED state: left-of-separator items vanish behind the separator */
+  .menubar.collapsed .hideable {
+    opacity: 0;
+    max-width: 0;
+    padding-left: 0; padding-right: 0;
+    margin-left: 0; margin-right: 0;
+    transform: translateX(24px) scale(0.7);
+    pointer-events: none;
+  }
+  /* The dot dims to grayed-out when collapsed and idle, vivid again on hover (HANDOFF) */
+  .menubar.collapsed .toggle-item .dot { filter: saturate(0.2) brightness(0.7); animation-play-state: paused; }
+  .menubar.collapsed:hover .toggle-item .dot { filter: none; animation-play-state: running; }
+
+  /* window body under the bar */
+  .demo-body {
+    height: 210px; position: relative;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+    background:
+      radial-gradient(600px 300px at 30% 0%, rgba(52, 199, 89, 0.10), transparent 60%),
+      radial-gradient(500px 300px at 80% 100%, rgba(10, 132, 255, 0.10), transparent 60%);
+  }
+  .demo-body .demo-status { font-size: 14px; font-weight: 600; color: var(--text); }
+  .demo-body .demo-sub { color: var(--text-faint); font-size: 13px; letter-spacing: 0.02em; }
+
+  .demo-controls {
+    display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;
+    padding: 16px; background: rgba(0,0,0,0.25);
+    border-top: 1px solid rgba(255,255,255,0.05);
+  }
+  .demo-btn {
+    font-family: var(--font); font-size: 13px; font-weight: 550; cursor: pointer;
+    background: var(--surface-2); color: var(--text); border: 1px solid var(--border-strong);
+    padding: 9px 16px; border-radius: 10px; transition: background 0.15s ease;
+  }
+  .demo-btn:hover { background: rgba(255,255,255,0.12); }
+  .demo-btn.on { background: var(--green); color: #052b10; border-color: transparent; }
+  .demo-caption { text-align: center; font-size: 13px; color: var(--text-faint); margin-top: 14px; }
+  .demo-caption kbd {
+    font-family: var(--font); font-size: 12px; background: var(--surface-2);
+    border: 1px solid var(--border-strong); border-bottom-width: 2px;
+    border-radius: 6px; padding: 2px 7px; color: var(--text-dim);
+  }
+
+  /* ---------- SECTIONS ---------- */
+  section { padding: 78px 0; }
+  .section-eyebrow { text-transform: uppercase; letter-spacing: 0.14em; font-size: 12px; font-weight: 640; color: var(--green); text-align: center; }
+  .section-title { font-size: clamp(28px, 4.5vw, 40px); font-weight: 700; text-align: center; margin-top: 12px; }
+  .section-lede { max-width: 620px; margin: 16px auto 0; text-align: center; color: var(--text-dim); font-size: 17px; }
+
+  /* how it works */
+  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-top: 48px; }
+  @media (max-width: 760px) { .steps { grid-template-columns: 1fr; } }
+  .step {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 26px 24px;
+  }
+  .step .num {
+    width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center;
+    font-family: var(--font-display); font-weight: 700; font-size: 15px;
+    background: rgba(52, 199, 89, 0.14); color: var(--green); margin-bottom: 16px;
+  }
+  .step h3 { font-size: 18px; margin-bottom: 8px; }
+  .step p { color: var(--text-dim); font-size: 15px; }
+  .step code {
+    font-family: var(--mono); font-size: 13px;
+    background: var(--surface-2); padding: 2px 6px; border-radius: 5px; color: var(--text);
+  }
+
+  /* features grid */
+  .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-top: 48px; }
+  @media (max-width: 860px) { .features { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 560px) { .features { grid-template-columns: 1fr; } }
+  .feature {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 24px; transition: border-color 0.2s ease, transform 0.2s ease;
+  }
+  .feature:hover { border-color: var(--border-strong); transform: translateY(-2px); }
+  .feature .ficon {
+    width: 42px; height: 42px; border-radius: 11px; display: grid; place-items: center;
+    background: var(--surface-2); border: 1px solid var(--border); margin-bottom: 16px;
+  }
+  .feature h3 { font-size: 17px; margin-bottom: 6px; }
+  .feature p { color: var(--text-dim); font-size: 14.5px; }
+  .badge-star {
+    display: inline-block; font-size: 11px; font-weight: 640; letter-spacing: 0.04em;
+    color: var(--green); background: rgba(52, 199, 89, 0.12);
+    padding: 2px 8px; border-radius: 999px; margin-left: 8px; vertical-align: middle;
+  }
+
+  /* video */
+  .media { margin-top: 40px; border-radius: 20px; overflow: hidden; border: 1px solid var(--border); box-shadow: var(--shadow); background: #000; }
+  .media video { display: block; width: 100%; height: auto; }
+  .media-fallback {
+    display: none; padding: 60px 24px; text-align: center; color: var(--text-faint);
+    background: linear-gradient(180deg, #14161c, #0c0e12);
+  }
+  .media.no-video video { display: none; }
+  .media.no-video .media-fallback { display: block; }
+
+  /* screenshots */
+  .shots { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 36px; }
+  .shots .full { grid-column: 1 / -1; }
+  @media (max-width: 640px) { .shots { grid-template-columns: 1fr; } }
+  .shot {
+    border-radius: 16px; overflow: hidden; border: 1px solid var(--border);
+    background: var(--surface); position: relative;
+  }
+  .shot img { display: block; width: 100%; height: auto; }
+  .shot .shot-label {
+    position: absolute; top: 12px; left: 12px; font-size: 12px; font-weight: 600;
+    background: rgba(0,0,0,0.55); backdrop-filter: blur(8px); color: #fff;
+    padding: 4px 10px; border-radius: 999px; z-index: 2;
+  }
+  .shot .placeholder {
+    display: flex; align-items: center; justify-content: center; min-height: 180px;
+    color: var(--text-faint); font-size: 13px; text-align: center; padding: 20px;
+    background: repeating-linear-gradient(45deg, rgba(255,255,255,0.02), rgba(255,255,255,0.02) 12px, rgba(255,255,255,0.04) 12px, rgba(255,255,255,0.04) 24px);
+  }
+  .shot img.loaded + .placeholder { display: none; }
+
+  /* comparison table */
+  .compare-wrap { margin-top: 44px; overflow-x: auto; }
+  table.compare {
+    width: 100%; border-collapse: collapse; min-width: 520px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 16px; overflow: hidden;
+  }
+  table.compare th, table.compare td {
+    padding: 14px 16px; text-align: left; font-size: 14.5px; border-bottom: 1px solid var(--border);
+  }
+  table.compare thead th {
+    font-family: var(--font-display); font-weight: 640; color: var(--text-dim); font-size: 13px;
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  table.compare thead th.us { color: var(--green); }
+  table.compare tbody th { font-weight: 560; color: var(--text-dim); }
+  table.compare td { color: var(--text); text-align: center; }
+  table.compare td.us { background: rgba(52, 199, 89, 0.07); font-weight: 600; }
+  table.compare tr:last-child td, table.compare tr:last-child th { border-bottom: none; }
+  .cmp-yes { color: var(--green); font-weight: 700; }
+  .cmp-no { color: var(--text-faint); }
+  .compare-note { text-align: center; font-size: 12.5px; color: var(--text-faint); margin-top: 14px; }
+
+  /* pricing */
+  .pricing-wrap { display: flex; justify-content: center; margin-top: 46px; }
+  .price-card {
+    max-width: 440px; width: 100%; background: var(--surface);
+    border: 1px solid var(--border-strong); border-radius: 22px; padding: 40px 34px;
+    text-align: center; box-shadow: var(--shadow); position: relative; overflow: hidden;
+  }
+  .price-card::before {
+    content: ""; position: absolute; inset: -1px; border-radius: 22px; padding: 1px;
+    background: linear-gradient(160deg, rgba(52,199,89,0.5), transparent 45%);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor; mask-composite: exclude; pointer-events: none;
+  }
+  .price-card .tier { font-size: 13px; text-transform: uppercase; letter-spacing: 0.14em; color: var(--text-dim); font-weight: 640; }
+  .price-card .amount { font-family: var(--font-display); font-size: 66px; font-weight: 700; margin: 14px 0 2px; letter-spacing: -0.03em; }
+  .price-card .amount span { font-size: 30px; vertical-align: super; color: var(--text-dim); }
+  .price-card .once { color: var(--green); font-weight: 600; font-size: 15px; }
+  .price-list { list-style: none; text-align: left; margin: 26px 0; display: grid; gap: 12px; }
+  .price-list li { display: flex; align-items: flex-start; gap: 10px; color: var(--text-dim); font-size: 15px; }
+  .price-list li .check { color: var(--green); flex: none; margin-top: 2px; }
+  .price-card .btn-primary { display: flex; justify-content: center; width: 100%; margin-top: 6px; }
+  .refund-note { margin-top: 18px; font-size: 13px; color: var(--text-faint); }
+
+  /* FAQ */
+  .faq { max-width: 760px; margin: 44px auto 0; }
+  .faq details {
+    border-bottom: 1px solid var(--border); padding: 4px 0;
+  }
+  .faq summary {
+    cursor: pointer; list-style: none; padding: 20px 4px; font-family: var(--font-display);
+    font-weight: 600; font-size: 17px; display: flex; justify-content: space-between; align-items: center; gap: 16px;
+  }
+  .faq summary::-webkit-details-marker { display: none; }
+  .faq summary .plus { flex: none; color: var(--text-faint); font-size: 22px; transition: transform 0.2s ease; line-height: 1; }
+  .faq details[open] summary .plus { transform: rotate(45deg); color: var(--green); }
+  .faq .answer { padding: 0 4px 22px; color: var(--text-dim); font-size: 15.5px; }
+  .faq .answer a { color: var(--green); text-decoration: underline; text-underline-offset: 2px; }
+
+  /* final CTA */
+  .final { text-align: center; padding: 90px 0 40px; }
+  .final h2 { font-size: clamp(30px, 5vw, 46px); font-weight: 700; }
+  .final p { color: var(--text-dim); font-size: 18px; margin: 16px auto 30px; max-width: 520px; }
+
+  /* footer */
+  footer {
+    border-top: 1px solid var(--border); padding: 40px 0 60px; margin-top: 40px;
+    color: var(--text-faint); font-size: 14px;
+  }
+  .foot-inner { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 18px; }
+  .foot-links { display: flex; gap: 22px; }
+  .foot-links a:hover { color: var(--text); }
+  .foot-brand { display: flex; align-items: center; gap: 8px; color: var(--text-dim); font-weight: 600; font-family: var(--font-display); }
+  .foot-brand .dot { width: 11px; height: 11px; border-radius: 50%; background: var(--green); }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+    .status-item { transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ============ NAV ============ -->
+<nav>
+  <div class="wrap nav-inner">
+    <div class="brand">
+      <span class="sep"></span><span class="dot"></span>MenuBarBuddy
+    </div>
+    <div class="nav-links">
+      <a href="#how">How it works</a>
+      <a href="#features">Features</a>
+      <a href="#compare">Compare</a>
+      <a href="#pricing">Pricing</a>
+      <a href="#faq">FAQ</a>
+      <a class="nav-buy" href="{BUY_URL}">Buy $4.20</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ============ HERO ============ -->
+<header class="hero">
+  <div class="wrap">
+    <span class="price-badge">One time <b>$4.20</b> &middot; no subscription, ever</span>
+    <h1>The menu bar hider<br />that <span class="accent">survives Tahoe</span>.</h1>
+    <p class="sub">
+      MenuBarBuddy hides the icons you do not need behind a single small dot. Click to collapse,
+      click again to bring everything back. Fast, native, and hardened to keep working when
+      macOS 26 Tahoe breaks the other ones.
+    </p>
+    <div class="hero-cta">
+      <a class="btn-primary" href="{BUY_URL}">Get MenuBarBuddy for $4.20</a>
+      <a class="btn-ghost" href="#how">See how it works</a>
+    </div>
+    <p class="hero-note">macOS 14 and up &middot; verified on macOS 26 Tahoe &middot; tiny native download</p>
+
+    <!-- LIVE DEMO: the page itself is the product -->
+    <div class="demo-shell" aria-label="Interactive demo of MenuBarBuddy hiding menu bar icons">
+      <div class="demo-window">
+        <div class="menubar" id="menubar">
+          <div class="mb-left">
+            <span class="apple">&#63743;</span>
+            <span class="app-menus"><span>Finder</span><span>File</span><span>Edit</span><span>View</span></span>
+          </div>
+          <div class="mb-right">
+            <!-- Hideable zone: everything LEFT of the separator -->
+            <span class="status-item hideable" title="Dictation">&#127908;</span>
+            <span class="status-item hideable" title="Docker">&#128011;</span>
+            <span class="status-item hideable" title="Audio">&#127925;</span>
+            <span class="status-item hideable" title="Screenshots">&#9635;</span>
+            <span class="status-item hideable" title="Wi-Fi">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>
+            </span>
+            <span class="status-item hideable" title="Keyboard">&#9000;</span>
+
+            <!-- The separator: the boundary -->
+            <span class="sep-item" title="Separator"></span>
+
+            <!-- Always visible zone (right of the dot) -->
+            <span class="status-item" title="Weather">&#9925;</span>
+            <span class="status-item" title="Battery">
+              <svg width="22" height="14" viewBox="0 0 24 14" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="2" width="18" height="10" rx="2.5"/><rect x="3" y="4" width="11" height="6" rx="1" fill="currentColor" stroke="none"/><rect x="20.5" y="5" width="2" height="4" rx="1" fill="currentColor" stroke="none"/></svg>
+            </span>
+
+            <!-- The toggle: a small green dot by default, a two-tone rainbow dot in Rainbow mode -->
+            <span class="toggle-item" id="toggle" role="button" tabindex="0" aria-label="Toggle collapse" title="Click the dot to collapse or expand"><span class="dot"></span></span>
+
+            <span class="status-item" style="font-variant-numeric: tabular-nums;">9:41</span>
+          </div>
+        </div>
+        <div class="demo-body">
+          <span class="demo-status" id="demoStatus">Icons visible</span>
+          <span class="demo-sub" id="demoSub">Click the dot to hide the clutter</span>
+        </div>
+        <div class="demo-controls">
+          <button class="demo-btn" id="btn-toggle">Collapse the menu bar</button>
+          <button class="demo-btn" id="btn-rainbow">&#127752; Rainbow dot: off</button>
+        </div>
+      </div>
+    </div>
+    <p class="demo-caption">
+      This is a live demo, not a picture. In the real app the same toggle is on the global hotkey
+      <kbd>Ctrl</kbd> <kbd>Opt</kbd> <kbd>Space</kbd>. By default the toggle is a small green dot, and you can turn on Rainbow Dot for the animated two-tone version.
+    </p>
+  </div>
+</header>
+
+<!-- ============ HOW IT WORKS ============ -->
+<section id="how">
+  <div class="wrap">
+    <p class="section-eyebrow">How it works</p>
+    <h2 class="section-title">Two tiny items. One clean bar.</h2>
+    <p class="section-lede">
+      MenuBarBuddy adds a toggle and a separator. Everything to the left of the separator hides on
+      collapse. Everything to the right stays. You decide the line.
+    </p>
+    <div class="steps">
+      <div class="step">
+        <div class="num">1</div>
+        <h3>Set the line</h3>
+        <p>The separator marks the boundary. Cmd-drag any icon to sit between the separator and the toggle to keep it always visible.</p>
+      </div>
+      <div class="step">
+        <div class="num">2</div>
+        <h3>Click the dot</h3>
+        <p>One click collapses the clutter behind the separator. Click again, or press <code>Ctrl+Opt+Space</code>, to bring it all back.</p>
+      </div>
+      <div class="step">
+        <div class="num">3</div>
+        <h3>Make it yours</h3>
+        <p>Right-click for the menu. Turn on the two-tone rainbow dot, and set it to start at login. Done.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FEATURES ============ -->
+<section id="features">
+  <div class="wrap">
+    <p class="section-eyebrow">Features</p>
+    <h2 class="section-title">Small app. Real polish.</h2>
+    <div class="features">
+      <div class="feature">
+        <div class="ficon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#34c759" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M8 12h.01M12 12h.01M16 12h.01M7 16h10"/></svg>
+        </div>
+        <h3>Global hotkey</h3>
+        <p>Toggle from anywhere with <code>Ctrl+Opt+Space</code>. No mouse trip to the corner of the screen.</p>
+      </div>
+      <div class="feature">
+        <div class="ficon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#ff375f" stroke-width="2"><circle cx="12" cy="12" r="8"/></svg>
+        </div>
+        <h3>Rainbow dot</h3>
+        <p>An optional two-tone dot: two hues a third of the wheel apart, blended along a wavy boundary that drifts as they phase through the spectrum. Vivid when active, softly grayed when idle.</p>
+      </div>
+      <div class="feature">
+        <div class="ficon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#0a84ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"/></svg>
+        </div>
+        <h3>Choose your look</h3>
+        <p>Run the classic green dot or flip on the animated rainbow. The look is yours, right from the menu.</p>
+      </div>
+      <div class="feature">
+        <div class="ficon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#34c759" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        </div>
+        <h3>Start at login</h3>
+        <p>One toggle and MenuBarBuddy is quietly there after every reboot, using the official SMAppService API. Set it and forget it.</p>
+      </div>
+      <div class="feature">
+        <div class="ficon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#34c759" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>
+        </div>
+        <h3>Tahoe-proof watchdog<span class="badge-star">the difference</span></h3>
+        <p>macOS 26 caps status item sizes and can orphan items after a crash. MenuBarBuddy shields every size write and checks for the failure roughly every 5 seconds, in both collapsed and expanded states. If it ever gets orphaned, it recreates its items in place, and can repair and relaunch itself as a last resort.</p>
+      </div>
+      <div class="feature">
+        <div class="ficon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#0a84ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20"/></svg>
+        </div>
+        <h3>Cmd-drag to arrange</h3>
+        <p>Move the separator and toggle anywhere with a Cmd-drag. A layout guard keeps the toggle on the safe side so it never hides itself.</p>
+      </div>
+      <div class="feature">
+        <div class="ficon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#34c759" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+        </div>
+        <h3>Featherweight and native</h3>
+        <p>Written in Swift and AppKit. No Electron, no background helper zoo. It sits quietly in your status bar and does one thing well.</p>
+      </div>
+      <div class="feature">
+        <div class="ficon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#0a84ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        </div>
+        <h3>No cloud, no accounts</h3>
+        <p>No sign-in, no telemetry, no server. MenuBarBuddy runs entirely on your Mac and never phones home.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ DEMO VIDEO ============ -->
+<section id="demo">
+  <div class="wrap">
+    <p class="section-eyebrow">See it move</p>
+    <h2 class="section-title">Fifteen seconds, cluttered to calm.</h2>
+    <div class="media" id="videoWrap">
+      <video id="demoVideo" src="assets/demo.mp4" poster="assets/poster.png" controls playsinline muted loop preload="none">
+      </video>
+      <div class="media-fallback">
+        <p>The demo clip is on its way. In the meantime, the live demo up top does the same thing, for real, right in your browser.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SCREENSHOTS ============ -->
+<section id="shots">
+  <div class="wrap">
+    <p class="section-eyebrow">Before and after</p>
+    <h2 class="section-title">Watch the noise disappear.</h2>
+    <div class="shots">
+      <div class="shot">
+        <span class="shot-label">Before</span>
+        <img src="assets/before.png" alt="A cluttered Mac menu bar with many icons" loading="lazy" onload="this.classList.add('loaded')" onerror="this.style.display='none'" />
+        <div class="placeholder">before.png &middot; the full, cluttered menu bar</div>
+      </div>
+      <div class="shot">
+        <span class="shot-label">After</span>
+        <img src="assets/after.png" alt="A clean Mac menu bar after collapsing with MenuBarBuddy" loading="lazy" onload="this.classList.add('loaded')" onerror="this.style.display='none'" />
+        <div class="placeholder">after.png &middot; one click later, calm</div>
+      </div>
+      <div class="shot full">
+        <span class="shot-label">Menu</span>
+        <img src="assets/menu.png" alt="The MenuBarBuddy menu showing Rainbow Dot and Start at Login" loading="lazy" onload="this.classList.add('loaded')" onerror="this.style.display='none'" />
+        <div class="placeholder">menu.png &middot; Rainbow Dot and Start at Login in the menu</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ COMPARISON ============ -->
+<section id="compare">
+  <div class="wrap">
+    <p class="section-eyebrow">How it stacks up</p>
+    <h2 class="section-title">Cheaper than most, tougher than free.</h2>
+    <p class="section-lede">There are great free menu bar tidiers out there. The gap shows up the day a macOS update changes the rules under them.</p>
+    <div class="compare-wrap">
+      <table class="compare">
+        <thead>
+          <tr>
+            <th scope="col">&nbsp;</th>
+            <th scope="col" class="us">MenuBarBuddy</th>
+            <th scope="col">Typical paid app</th>
+            <th scope="col">Typical free app</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row">Price</th>
+            <td class="us">$4.20 once</td>
+            <td>Around $20</td>
+            <td>Free</td>
+          </tr>
+          <tr>
+            <th scope="row">Subscription</th>
+            <td class="us"><span class="cmp-no">None</span></td>
+            <td>Sometimes</td>
+            <td><span class="cmp-no">None</span></td>
+          </tr>
+          <tr>
+            <th scope="row">Hardened for macOS 26 Tahoe</th>
+            <td class="us"><span class="cmp-yes">Yes</span></td>
+            <td>Varies</td>
+            <td>Hit or miss</td>
+          </tr>
+          <tr>
+            <th scope="row">Self-healing watchdog</th>
+            <td class="us"><span class="cmp-yes">Yes</span></td>
+            <td><span class="cmp-no">Rare</span></td>
+            <td><span class="cmp-no">No</span></td>
+          </tr>
+          <tr>
+            <th scope="row">Global hotkey and rainbow dot</th>
+            <td class="us"><span class="cmp-yes">Yes</span></td>
+            <td>Some</td>
+            <td>Some</td>
+          </tr>
+          <tr>
+            <th scope="row">No cloud, no account</th>
+            <td class="us"><span class="cmp-yes">Yes</span></td>
+            <td>Varies</td>
+            <td>Usually</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="compare-note">Prices and capabilities of other apps change often. Check their current listings before you compare.</p>
+  </div>
+</section>
+
+<!-- ============ PRICING ============ -->
+<section id="pricing">
+  <div class="wrap">
+    <p class="section-eyebrow">Pricing</p>
+    <h2 class="section-title">Buy it once. Keep it forever.</h2>
+    <p class="section-lede">No trial nag screens, no accounts, no monthly bill. One friendly price and every update is included.</p>
+    <div class="pricing-wrap">
+      <div class="price-card">
+        <div class="tier">MenuBarBuddy</div>
+        <div class="amount"><span>$</span>4.20</div>
+        <div class="once">one time payment</div>
+        <ul class="price-list">
+          <li><span class="check">&#10003;</span> Collapse and expand with one click or the hotkey</li>
+          <li><span class="check">&#10003;</span> Classic green dot or the animated rainbow</li>
+          <li><span class="check">&#10003;</span> Start at login and Cmd-drag arranging</li>
+          <li><span class="check">&#10003;</span> Tahoe-proof self-healing watchdog</li>
+          <li><span class="check">&#10003;</span> All future updates, free</li>
+          <li><span class="check">&#10003;</span> No subscription, no account, no tracking</li>
+        </ul>
+        <a class="btn-primary" href="{BUY_URL}">Get it for $4.20</a>
+        <p class="refund-note">Not happy? Email us within 30 days for a full refund. It is $4.20, nobody is fighting over it.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FAQ ============ -->
+<section id="faq">
+  <div class="wrap">
+    <p class="section-eyebrow">Questions</p>
+    <h2 class="section-title">Good to know.</h2>
+    <div class="faq">
+      <details open>
+        <summary>Why $4.20? <span class="plus">+</span></summary>
+        <div class="answer">
+          Because a clean menu bar should feel good, and $4.20 is a wink, not a business plan. It is priced to be an easy yes: less than a coffee, once, forever. The number is part of the charm and we are keeping it.
+        </div>
+      </details>
+      <details>
+        <summary>Is there a trial? <span class="plus">+</span></summary>
+        <div class="answer">
+          The interactive demo at the top of this page is the trial. It runs the real collapse behavior right in your browser so you can feel it before you spend $4.20.
+        </div>
+      </details>
+      <details>
+        <summary>What about refunds? <span class="plus">+</span></summary>
+        <div class="answer">
+          If MenuBarBuddy does not click for you, email <a href="mailto:{SUPPORT_EMAIL}">{SUPPORT_EMAIL}</a> within 30 days and we will refund you, no form required. It is $4.20. Nobody is fighting over it.
+        </div>
+      </details>
+      <details>
+        <summary>How does the toggle look? <span class="plus">+</span></summary>
+        <div class="answer">
+          By default the toggle is a small green dot that sits at the right of your icons. Right-click it and turn on Rainbow Dot to swap in an animated two-tone dot that cycles the color wheel. Either way, the dot grays out when the bar is collapsed and idle, and turns vivid on hover or when expanded.
+        </div>
+      </details>
+      <details>
+        <summary>Does it work on macOS 26 Tahoe? <span class="plus">+</span></summary>
+        <div class="answer">
+          Yes, and this is the whole point. Tahoe quietly changed how the menu bar works and broke a lot of hiders. macOS 26 added a hard cap on status item size that silently kills the toggle in apps that do not expect it, and a crash can make the system orphan an app's items. MenuBarBuddy wraps every size write in a safety shield, checks for the failure roughly every 5 seconds in both collapsed and expanded states, recreates its items in place if they get orphaned, and can repair and relaunch itself as a last resort. It runs on macOS 14 and up, and is verified on macOS 26 Tahoe.
+        </div>
+      </details>
+      <details>
+        <summary>Do updates cost extra? <span class="plus">+</span></summary>
+        <div class="answer">
+          Never. Your $4.20 covers every future update. No upgrade fees, no version two paywall.
+        </div>
+      </details>
+      <details>
+        <summary>Is it on the Mac App Store? <span class="plus">+</span></summary>
+        <div class="answer">
+          You buy and download it right here. Direct download keeps the price low and lets MenuBarBuddy do menu bar tricks, like watching its own status items and self-repairing, that the store sandbox makes awkward. It also means fixes reach you the day they ship, not after a review queue.
+        </div>
+      </details>
+      <details>
+        <summary>How is this different from the free apps? <span class="plus">+</span></summary>
+        <div class="answer">
+          The free tools are genuinely good until an OS update trips them, and then it is your problem to solve. MenuBarBuddy is a paid app with an owner who fixes things: the Tahoe hardening and self-healing watchdog are proof of that. You are buying support and momentum for the price of a snack.
+        </div>
+      </details>
+      <details>
+        <summary>Can I see the code? <span class="plus">+</span></summary>
+        <div class="answer">
+          The project is developed in the open on <a href="https://github.com/cfranci/MenuBarBuddy" target="_blank" rel="noopener">GitHub</a>, so you can read exactly what runs on your Mac and build it yourself if you like. Paying for the ready-to-run build is what keeps the updates coming when macOS changes the rules again.
+        </div>
+      </details>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FINAL CTA ============ -->
+<section class="final">
+  <div class="wrap">
+    <h2>Give your menu bar some breathing room.</h2>
+    <p>One dot, one click, one clean bar. And one honest price.</p>
+    <a class="btn-primary" href="{BUY_URL}">Get MenuBarBuddy for $4.20</a>
+  </div>
+</section>
+
+<!-- ============ FOOTER ============ -->
+<footer>
+  <div class="wrap foot-inner">
+    <div class="foot-brand"><span class="dot"></span>MenuBarBuddy</div>
+    <div class="foot-links">
+      <a href="mailto:{SUPPORT_EMAIL}">{SUPPORT_EMAIL}</a>
+      <a href="https://github.com/cfranci/MenuBarBuddy" target="_blank" rel="noopener">GitHub</a>
+      <a href="#pricing">Buy</a>
+    </div>
+    <div>&copy; 2026 MenuBarBuddy</div>
+  </div>
+</footer>
+
+<script>
+  (function () {
+    var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    var bar = document.getElementById("menubar");
+    var toggleEl = document.getElementById("toggle");
+    var btnToggle = document.getElementById("btn-toggle");
+    var btnRainbow = document.getElementById("btn-rainbow");
+    var demoStatus = document.getElementById("demoStatus");
+    var demoSub = document.getElementById("demoSub");
+
+    function setCollapsed(state) {
+      if (state) {
+        bar.classList.add("collapsed");
+        btnToggle.textContent = "Expand the menu bar";
+        btnToggle.classList.add("on");
+        demoStatus.textContent = "Icons hidden";
+        demoSub.textContent = "Menu bar is clean";
+      } else {
+        bar.classList.remove("collapsed");
+        btnToggle.textContent = "Collapse the menu bar";
+        btnToggle.classList.remove("on");
+        demoStatus.textContent = "Icons visible";
+        demoSub.textContent = "Click the dot to hide the clutter";
+      }
+    }
+    function toggle() { setCollapsed(!bar.classList.contains("collapsed")); }
+
+    toggleEl.addEventListener("click", toggle);
+    toggleEl.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+    });
+    btnToggle.addEventListener("click", toggle);
+
+    btnRainbow.addEventListener("click", function () {
+      var on = toggleEl.classList.toggle("rainbow");
+      btnRainbow.classList.toggle("on", on);
+      btnRainbow.innerHTML = on ? "🌈 Rainbow dot: on" : "🌈 Rainbow dot: off";
+    });
+
+    // Gentle auto-demo loop so a passive visitor still sees it work.
+    // Single interval with a run counter; yields the moment the user interacts.
+    if (!reduce) {
+      var runs = 0;
+      var loop = setInterval(function () {
+        if (toggleEl.dataset.userTouched === "1" || runs >= 3) { clearInterval(loop); return; }
+        toggle();
+        runs += 0.5; // one full collapse+expand cycle counts as one run
+      }, 2600);
+      [toggleEl, btnToggle, btnRainbow].forEach(function (el) {
+        el.addEventListener("click", function () { toggleEl.dataset.userTouched = "1"; });
+      });
+    }
+
+    // Graceful video handling: if the source errors, show the fallback.
+    // Uses onerror only (no timeout) so slow connections never false-trigger.
+    var video = document.getElementById("demoVideo");
+    var videoWrap = document.getElementById("videoWrap");
+    if (video) {
+      video.addEventListener("error", function () { videoWrap.classList.add("no-video"); });
+    }
+  })();
+</script>
+</body>
+</html>
