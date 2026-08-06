@@ -1,11 +1,75 @@
 # Handoff — MenuBarBuddy
-*Updated: 2026-07-03 (late evening)*
+*Updated: 2026-07-11*
 
 ## Status: WORKING + HARDENED on macOS 26.2 (Tahoe)
 
 The March collapse bug is fixed and verified end-to-end on the installed app
 (hotkey toggle, screenshot-verified hide/restore across displays). A hardening
-pass followed; current bundle ID is **com.menubarbuddy.v6**.
+pass followed; current bundle ID is **com.menubarbuddy.v10**.
+
+## July 11 2026: daily false alarm fixed + Appearance system
+
+**The daily "icons are being blocked" alert was a watchdog false positive,
+not real blacklisting.** The bundle ID climbed v6 → v10 in one week from
+Ga'noh clicking "Repair and Relaunch" on bogus alerts. Root cause: the orphan
+signature used single-display geometry. `window.frame.origin.y < 0` is a
+legitimate coordinate when a display is arranged below/left of the main one
+(this Mac runs 3+ displays incl. TouchProxy virtuals and a TV), and
+display sleep / screen lock / display reconfiguration all detach or move the
+status item windows for longer than the 15s streak. Fixes in `checkHosting`/
+`itemsLookOrphaned`:
+
+- Watchdog stands down while screens are asleep or the session is locked
+  (NSWorkspace + com.apple.screenIsLocked distributed notifications), for
+  60s after any display reconfiguration or wake, 30s after unlock, and while
+  any mouse button is down.
+- "Parked" now means the window intersects NO online screen (was `y < 0`).
+- Recovery attempts reset after 24h without incident (isolated transients
+  no longer accumulate into the alert); the alert itself is throttled to
+  once per 20h persisted across relaunches (`MenuBarBuddy.lastRepairAlertAt`).
+- Every orphan verdict now NSLogs which sub-check tripped.
+- `applicationShouldTerminate` expands before ANY termination path
+  (AppleScript quit, logout) — previously only quitApp()/signals expanded,
+  and install.sh's `tell app to quit` could kill a collapsed instance.
+- install.sh now quits the app BEFORE touching the bundle and keeps the
+  HIGHER bundle-ID vN between Support/Info.plist and the installed app, so a
+  reinstall can never revert to a blacklisted ID (Support/Info.plist synced
+  to v10).
+
+**Appearance system** (replaces the single "Rainbow Dot" toggle; right-click
+→ Appearance):
+
+- **Style**: Classic Green, Rainbow, Ocean, Lava, Aurora, Custom Color…
+  (NSColorPanel; hue persisted as `MenuBarBuddy.customDotHue`).
+- **Motion**: Wave (default), Ripple (radial rings), Spin (rotating conic),
+  Breathe (radius pulse), Steady (fixed split). **Motions LAYER**: the menu
+  items toggle a set, any combination runs at once (each active motion
+  contributes a per-pixel blend component and they're averaged; breathe
+  modulates the radius independently). Empty set = solid top color.
+- **Speed**: Slow / Normal / Fast (0.5x / 1x / 2x).
+- Persisted as `MenuBarBuddy.dotStyle/dotMotion/dotSpeed`; dotMotion is a
+  comma-joined list ("breathe,spin,wave"), and a bare single value from
+  older builds parses fine. All in the SettingsStore migration list.
+  Back-compat: old `rainbowDot=true` maps to Rainbow; the flag is kept
+  coherent for downgrades.
+- Renderer: `makeStyledDotImage` (generalized `makeWaveDotImage`), same
+  36x36 bitmap at 20fps, same vividness rule (gray when collapsed + idle).
+- Verified live: install, hotkey collapse/expand cycle, dot renders and
+  grays correctly (screenshots).
+
+**Site demo** (`site/index.html`): the hero demo now has Style + Motion chip
+rows mirroring the app (Classic/Rainbow/Ocean/Lava/Aurora x
+Wave/Ripple/Spin/Breathe/Steady). Motion chips are multi-select like the
+app: JS composes the active animations inline on `.dot` (wave animates
+background-position, ripple background-size, spin transform-rotate), breathe
+scales a `.dot-wrap` wrapper so it never fights spin on `transform`, and the
+collapsed pause rules use `!important` because inline animation shorthand
+would otherwise reset play-state. Verified with Playwright (layered combos,
+pause-when-collapsed, empty-set static state; no page errors). NOTE: GitHub Pages is NOT enabled yet and {BUY_URL} is
+still a placeholder — the site is pre-launch. A Supabase "live demo" backend
+was considered and rejected: the demo is client-side and needs no data,
+accounts, or state; a backend adds cost and an outage surface for zero
+visitor-visible gain.
 
 ## Menu bar arrangement (as of close, July 3 2026)
 

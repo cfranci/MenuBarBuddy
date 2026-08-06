@@ -4,6 +4,69 @@ import HotKey
 import ServiceManagement
 import ExceptionShield
 
+/// Color families for the toggle dot. Every non-classic style renders through
+/// the animated two-tone engine; classic keeps the original green/gray fade.
+enum DotStyle: String, CaseIterable {
+    case classic, rainbow, ocean, lava, aurora, custom
+
+    var title: String {
+        switch self {
+        case .classic: return "Classic Green"
+        case .rainbow: return "Rainbow"
+        case .ocean:   return "Ocean"
+        case .lava:    return "Lava"
+        case .aurora:  return "Aurora"
+        case .custom:  return "Custom Color…"
+        }
+    }
+
+    /// (baseHue, drift range, top/bottom hue offset). Rainbow ignores these
+    /// and cycles the full wheel; custom substitutes the user's hue.
+    var palette: (base: CGFloat, drift: CGFloat, offset: CGFloat) {
+        switch self {
+        case .ocean:  return (0.55, 0.07, 0.06)
+        case .lava:   return (0.02, 0.05, 0.06)
+        case .aurora: return (0.38, 0.08, 0.34)
+        default:      return (0.45, 0.00, 0.33)
+        }
+    }
+}
+
+/// How the two tones move inside the dot.
+enum DotMotion: String, CaseIterable {
+    case wave, ripple, spin, breathe, steady
+
+    var title: String {
+        switch self {
+        case .wave:    return "Wave"
+        case .ripple:  return "Ripple"
+        case .spin:    return "Spin"
+        case .breathe: return "Breathe"
+        case .steady:  return "Steady"
+        }
+    }
+}
+
+enum DotSpeed: String, CaseIterable {
+    case slow, normal, fast
+
+    var title: String {
+        switch self {
+        case .slow:   return "Slow"
+        case .normal: return "Normal"
+        case .fast:   return "Fast"
+        }
+    }
+
+    var multiplier: CGFloat {
+        switch self {
+        case .slow:   return 0.5
+        case .normal: return 1.0
+        case .fast:   return 2.0
+        }
+    }
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate {
     // Created FIRST = rightmost = always visible (just like Hidden Bar's btnExpandCollapse)
     // (var, not let: the hosting watchdog can recreate them if the menu bar
@@ -15,10 +78,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindow: NSWindow?
     private var contextMenu: NSMenu!
     private var startAtLoginMenuItem: NSMenuItem?
-    private var rainbowDotMenuItem: NSMenuItem?
+    private var appearanceMenu: NSMenu?
     private var rainbowTimer: Timer?
     private var rainbowHue: CGFloat = 0.45  // start near the classic mint
     private var rainbowWavePhase: CGFloat = 0
+    private var palettePhase: CGFloat = 0   // slow drift for themed palettes
     private var hotKey: HotKey?
     private var mouseMonitor: Any?
     private var mouseTimer: Timer?
@@ -34,6 +98,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var parkedStreak = 0
     private var hostingRecoveryAttempts = 0
     private var repairAlertShown = false
+    // Display sleep, screen lock, and display reconfiguration all move or
+    // detach status item windows transiently; the watchdog must stand down
+    // through them or every overnight idle looks like an orphaning.
+    private var watchdogGraceUntil = Date.distantPast
+    private var screensAsleep = false
+    private var sessionLocked = false
+    private var lastHostingRecoveryAt = Date.distantPast
 
     private let settingsStore = SettingsStore.shared
     private var collapseLength: CGFloat = 2000
@@ -73,6 +144,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSApplication.didChangeScreenParametersNotification,
             object: nil
         )
+        setupWatchdogSuppression()
 
         if CommandLine.arguments.contains("--force-repair") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [self] in
@@ -246,6 +318,56 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func screenChanged() {
         updateCollapseLength()
+        // Displays connecting/disconnecting/mirroring (external monitors, TVs,
+        // Sidecar, virtual displays) shuffle status item windows for several
+        // seconds. Never count those frames as orphaning.
+        deferWatchdog(seconds: 60)
+    }
+
+    /// Suspend the hosting watchdog while the machine is in a state where
+    /// status item geometry is meaningless, and give it a grace period after
+    /// coming back. Without this, an overnight display sleep or a lock screen
+    /// reliably racked up 3 "orphaned" ticks and ended in a bogus repair alert
+    /// (the bundle ID climbed v6 -> v10 in one week that way).
+    private func setupWatchdogSuppression() {
+        let workspace = NSWorkspace.shared.notificationCenter
+        workspace.addObserver(self, selector: #selector(screensDidSleep),
+                              name: NSWorkspace.screensDidSleepNotification, object: nil)
+        workspace.addObserver(self, selector: #selector(screensDidWake),
+                              name: NSWorkspace.screensDidWakeNotification, object: nil)
+        workspace.addObserver(self, selector: #selector(screensDidWake),
+                              name: NSWorkspace.didWakeNotification, object: nil)
+        let dist = DistributedNotificationCenter.default()
+        dist.addObserver(self, selector: #selector(sessionLockedNotification),
+                         name: NSNotification.Name("com.apple.screenIsLocked"), object: nil)
+        dist.addObserver(self, selector: #selector(sessionUnlockedNotification),
+                         name: NSNotification.Name("com.apple.screenIsUnlocked"), object: nil)
+    }
+
+    private func deferWatchdog(seconds: TimeInterval) {
+        watchdogGraceUntil = max(watchdogGraceUntil, Date().addingTimeInterval(seconds))
+        parkedStreak = 0
+        misorderStreak = 0
+    }
+
+    @objc private func screensDidSleep() {
+        screensAsleep = true
+        parkedStreak = 0
+    }
+
+    @objc private func screensDidWake() {
+        screensAsleep = false
+        deferWatchdog(seconds: 60)
+    }
+
+    @objc private func sessionLockedNotification() {
+        sessionLocked = true
+        parkedStreak = 0
+    }
+
+    @objc private func sessionUnlockedNotification() {
+        sessionLocked = false
+        deferWatchdog(seconds: 30)
     }
 
     private func setupHotKey() {
@@ -286,10 +408,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return img
     }
 
-    /// Two-tone rainbow dot: one hue on top, another below, blended along a
-    /// wavy boundary that drifts through the middle. Rendered per-pixel into a
-    /// small retina bitmap (36x36 px, trivial at 20fps).
-    private func makeWaveDotImage(topColor: NSColor, bottomColor: NSColor, wavePhase: CGFloat, size: CGFloat = 18) -> NSImage {
+    /// Two-tone animated dot: one hue on top, another below, blended along a
+    /// moving boundary. Motions layer: each active motion contributes a blend
+    /// component and they are averaged per-pixel, so wave + spin + ripple all
+    /// show at once; breathe modulates the radius independently. Rendered
+    /// per-pixel into a small retina bitmap (36x36 px, trivial at 20fps).
+    private func makeStyledDotImage(topColor: NSColor, bottomColor: NSColor, wavePhase: CGFloat,
+                                    motions: Set<DotMotion>, size: CGFloat = 18) -> NSImage {
         let scale: CGFloat = 2
         let px = Int(size * scale)
         guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: px, pixelsHigh: px,
@@ -301,7 +426,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
               let bytes = rep.bitmapData else {
             return makeDotImage(color: topColor, size: size)
         }
-        let dotRadius = 4.5 * scale               // same 9pt dot as the classic image
+        var dotRadius = 4.5 * scale               // same 9pt dot as the classic image
+        if motions.contains(.breathe) {
+            // The whole dot swells and shrinks; layers under any boundary motion.
+            dotRadius *= 0.88 + 0.12 * sin(wavePhase)
+        }
         let center = CGFloat(px) / 2
         let amplitude = dotRadius * 0.35          // wave height
         let blendBand = dotRadius * 0.9           // soft gradient thickness
@@ -319,11 +448,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     bytes[offset] = 0; bytes[offset + 1] = 0; bytes[offset + 2] = 0; bytes[offset + 3] = 0
                     continue
                 }
-                // Wavy boundary: crosses the middle, drifting with wavePhase.
-                let wave = amplitude * sin((dx / dotRadius) * .pi * 1.4 + wavePhase)
-                var t = (dy - wave) / blendBand + 0.5                // 0 = top color, 1 = bottom
-                t = max(0, min(1, t))
-                t = t * t * (3 - 2 * t)                              // smoothstep
+                // Blend factor: 0 = top color, 1 = bottom color. Each active
+                // motion contributes a component; the average layers them.
+                var components: [CGFloat] = []
+                if motions.contains(.wave) {
+                    // Wavy boundary: crosses the middle, drifting with wavePhase.
+                    let wave = amplitude * sin((dx / dotRadius) * .pi * 1.4 + wavePhase)
+                    var tw = (dy - wave) / blendBand + 0.5
+                    tw = max(0, min(1, tw))
+                    components.append(tw * tw * (3 - 2 * tw))        // smoothstep
+                }
+                if motions.contains(.ripple) {
+                    // Concentric rings flowing outward from the center.
+                    components.append(0.5 + 0.5 * sin((dist / dotRadius) * .pi * 2.2 - wavePhase * 2))
+                }
+                if motions.contains(.spin) {
+                    // A two-tone gradient rotating around the center.
+                    components.append(0.5 + 0.5 * sin(atan2(dy, dx) + wavePhase))
+                }
+                if motions.contains(.steady) {
+                    // Fixed soft horizontal split, no movement.
+                    var ts = dy / blendBand + 0.5
+                    ts = max(0, min(1, ts))
+                    components.append(ts * ts * (3 - 2 * ts))
+                }
+                // Breathe alone (or nothing) = solid top color.
+                let t = components.isEmpty ? 0 : components.reduce(0, +) / CGFloat(components.count)
                 let r = tr + (br - tr) * t
                 let g = tg + (bg - tg) * t
                 let b = tb + (bb - tb) * t
@@ -338,11 +488,59 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return img
     }
 
-    // MARK: - Rainbow dot (optional mode)
+    // MARK: - Appearance (dot style / motion / speed)
 
+    /// Kept for back-compat: older builds persisted a single Rainbow Dot flag.
     private var rainbowEnabled: Bool {
         get { UserDefaults.standard.bool(forKey: "MenuBarBuddy.rainbowDot") }
         set { UserDefaults.standard.set(newValue, forKey: "MenuBarBuddy.rainbowDot") }
+    }
+
+    private var dotStyle: DotStyle {
+        get {
+            if let raw = UserDefaults.standard.string(forKey: "MenuBarBuddy.dotStyle"),
+               let style = DotStyle(rawValue: raw) {
+                return style
+            }
+            return rainbowEnabled ? .rainbow : .classic   // pre-appearance builds
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: "MenuBarBuddy.dotStyle")
+            rainbowEnabled = newValue != .classic         // keep the old flag coherent
+        }
+    }
+
+    /// Motions LAYER: any combination can be active at once (wave + spin +
+    /// breathe, etc.). Persisted as a comma-joined list; a bare single value
+    /// from older builds parses the same way. nil = default [wave]; an empty
+    /// string is a deliberate "no motion" (solid dot).
+    private var dotMotions: Set<DotMotion> {
+        get {
+            guard let raw = UserDefaults.standard.string(forKey: "MenuBarBuddy.dotMotion") else { return [.wave] }
+            return Set(raw.split(separator: ",").compactMap { DotMotion(rawValue: String($0)) })
+        }
+        set {
+            UserDefaults.standard.set(newValue.map(\.rawValue).sorted().joined(separator: ","),
+                                      forKey: "MenuBarBuddy.dotMotion")
+        }
+    }
+
+    private var dotSpeed: DotSpeed {
+        get {
+            guard let raw = UserDefaults.standard.string(forKey: "MenuBarBuddy.dotSpeed"),
+                  let speed = DotSpeed(rawValue: raw) else { return .normal }
+            return speed
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: "MenuBarBuddy.dotSpeed") }
+    }
+
+    /// Hue (0..1) for the Custom style, set from the color panel.
+    private var customDotHue: CGFloat {
+        get {
+            let saved = UserDefaults.standard.double(forKey: "MenuBarBuddy.customDotHue")
+            return saved > 0 ? CGFloat(saved) : 0.75      // default: purple
+        }
+        set { UserDefaults.standard.set(Double(newValue), forKey: "MenuBarBuddy.customDotHue") }
     }
 
     private func startRainbowIfNeeded() {
@@ -360,8 +558,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func rainbowTick() {
-        // Full hue cycle roughly every 8 seconds.
-        rainbowHue = (rainbowHue + 0.05 / 8.0).truncatingRemainder(dividingBy: 1.0)
+        let speed = dotSpeed.multiplier
+        let style = dotStyle
+        // Full hue cycle roughly every 8 seconds (rainbow only).
+        rainbowHue = (rainbowHue + speed * 0.05 / 8.0).truncatingRemainder(dividingBy: 1.0)
+        // Themed palettes drift slowly around their base hue instead.
+        palettePhase = (palettePhase + speed * 0.05 * 2 * .pi / 10).truncatingRemainder(dividingBy: 2 * .pi)
         // Same vividness rule as the classic dot: vivid when expanded or
         // hovered, grayed out when collapsed and idle. currentDotAlpha eases
         // between the two so state changes fade instead of snapping.
@@ -374,24 +576,88 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let saturation = 0.15 + 0.75 * currentDotAlpha
         let brightness = 0.55 + 0.45 * currentDotAlpha
-        // Two hues a third of the wheel apart, top and bottom, blended along a
-        // wave that drifts through the middle (~one sweep every 4 seconds).
-        rainbowWavePhase = (rainbowWavePhase + 0.05 * 2 * .pi / 4).truncatingRemainder(dividingBy: 2 * .pi)
-        let bottomHue = (rainbowHue + 0.33).truncatingRemainder(dividingBy: 1.0)
-        let topColor = NSColor(hue: rainbowHue, saturation: saturation, brightness: brightness, alpha: 1.0)
+        // Boundary movement: ~one sweep every 4 seconds at normal speed.
+        rainbowWavePhase = (rainbowWavePhase + speed * 0.05 * 2 * .pi / 4).truncatingRemainder(dividingBy: 2 * .pi)
+
+        let topHue: CGFloat
+        let bottomHue: CGFloat
+        switch style {
+        case .rainbow, .classic:
+            topHue = rainbowHue
+            bottomHue = (rainbowHue + 0.33).truncatingRemainder(dividingBy: 1.0)
+        case .custom:
+            let base = customDotHue
+            topHue = (base + 0.03 * sin(palettePhase) + 1).truncatingRemainder(dividingBy: 1.0)
+            bottomHue = (base + 0.08 + 1).truncatingRemainder(dividingBy: 1.0)
+        default:
+            let p = style.palette
+            topHue = (p.base + p.drift * sin(palettePhase) + 1).truncatingRemainder(dividingBy: 1.0)
+            bottomHue = (topHue + p.offset).truncatingRemainder(dividingBy: 1.0)
+        }
+        let topColor = NSColor(hue: topHue, saturation: saturation, brightness: brightness, alpha: 1.0)
         let bottomColor = NSColor(hue: bottomHue, saturation: saturation, brightness: brightness, alpha: 1.0)
-        toggleItem.button?.image = makeWaveDotImage(topColor: topColor, bottomColor: bottomColor, wavePhase: rainbowWavePhase)
+        toggleItem.button?.image = makeStyledDotImage(topColor: topColor, bottomColor: bottomColor,
+                                                      wavePhase: rainbowWavePhase, motions: dotMotions)
     }
 
-    @objc private func toggleRainbowDot() {
-        rainbowEnabled.toggle()
-        rainbowDotMenuItem?.state = rainbowEnabled ? .on : .off
-        if !rainbowEnabled { stopRainbow() }
+    @objc private func selectDotStyle(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let style = DotStyle(rawValue: raw) else { return }
+        if style == .custom {
+            openCustomColorPanel()
+        }
+        dotStyle = style
+        refreshAppearanceMenu()
+        updateDotColor()
+    }
+
+    @objc private func selectDotMotion(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let motion = DotMotion(rawValue: raw) else { return }
+        var set = dotMotions
+        if set.contains(motion) {
+            set.remove(motion)
+        } else {
+            set.insert(motion)
+        }
+        dotMotions = set
+        refreshAppearanceMenu()
+        updateDotColor()
+    }
+
+    @objc private func selectDotSpeed(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let speed = DotSpeed(rawValue: raw) else { return }
+        dotSpeed = speed
+        refreshAppearanceMenu()
+        updateDotColor()
+    }
+
+    private func openCustomColorPanel() {
+        let panel = NSColorPanel.shared
+        panel.showsAlpha = false
+        panel.mode = .wheel
+        panel.color = NSColor(hue: customDotHue, saturation: 0.9, brightness: 1.0, alpha: 1.0)
+        panel.setTarget(self)
+        panel.setAction(#selector(customColorChanged(_:)))
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func customColorChanged(_ sender: NSColorPanel) {
+        guard let color = sender.color.usingColorSpace(.deviceRGB) else { return }
+        var hue: CGFloat = 0, sat: CGFloat = 0, bri: CGFloat = 0, alpha: CGFloat = 0
+        color.getHue(&hue, saturation: &sat, brightness: &bri, alpha: &alpha)
+        customDotHue = hue
+        if dotStyle != .custom {
+            dotStyle = .custom
+            refreshAppearanceMenu()
+        }
         updateDotColor()
     }
 
     private func updateDotColor() {
-        if rainbowEnabled {
+        if dotStyle != .classic {
             startRainbowIfNeeded()
             return
         }
@@ -581,17 +847,62 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         contextMenu.addItem(loginItem)
         startAtLoginMenuItem = loginItem
 
-        let rainbowItem = NSMenuItem(title: "Rainbow Dot", action: #selector(toggleRainbowDot), keyEquivalent: "")
-        rainbowItem.target = self
-        rainbowItem.state = rainbowEnabled ? .on : .off
-        contextMenu.addItem(rainbowItem)
-        rainbowDotMenuItem = rainbowItem
+        let appearanceItem = NSMenuItem(title: "Appearance", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        func addHeader(_ title: String) {
+            let header = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            submenu.addItem(header)
+        }
+        addHeader("Style")
+        for style in DotStyle.allCases {
+            let item = NSMenuItem(title: style.title, action: #selector(selectDotStyle(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = style.rawValue
+            submenu.addItem(item)
+        }
+        submenu.addItem(NSMenuItem.separator())
+        addHeader("Motion — stack any")
+        for motion in DotMotion.allCases {
+            let item = NSMenuItem(title: motion.title, action: #selector(selectDotMotion(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = motion.rawValue
+            submenu.addItem(item)
+        }
+        submenu.addItem(NSMenuItem.separator())
+        addHeader("Speed")
+        for speed in DotSpeed.allCases {
+            let item = NSMenuItem(title: speed.title, action: #selector(selectDotSpeed(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = speed.rawValue
+            submenu.addItem(item)
+        }
+        appearanceItem.submenu = submenu
+        contextMenu.addItem(appearanceItem)
+        appearanceMenu = submenu
+        refreshAppearanceMenu()
 
         contextMenu.addItem(NSMenuItem.separator())
 
         let quitItem = NSMenuItem(title: "Quit MenuBarBuddy", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
         contextMenu.addItem(quitItem)
+    }
+
+    /// Sync the checkmarks in the Appearance submenu to the persisted settings.
+    private func refreshAppearanceMenu() {
+        guard let submenu = appearanceMenu else { return }
+        for item in submenu.items {
+            guard let raw = item.representedObject as? String else { continue }
+            let isOn: Bool
+            switch item.action {
+            case #selector(selectDotStyle(_:)):  isOn = raw == dotStyle.rawValue
+            case #selector(selectDotMotion(_:)): isOn = DotMotion(rawValue: raw).map(dotMotions.contains) ?? false
+            case #selector(selectDotSpeed(_:)):  isOn = raw == dotSpeed.rawValue
+            default: isOn = false
+            }
+            item.state = isOn ? .on : .off
+        }
     }
 
     private func updateContextMenuTitle() {
@@ -611,7 +922,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if event.type == .rightMouseUp {
             updateContextMenuTitle()
             startAtLoginMenuItem?.state = startAtLoginEnabled ? .on : .off
-            rainbowDotMenuItem?.state = rainbowEnabled ? .on : .off
+            refreshAppearanceMenu()
             toggleItem.menu = contextMenu
             toggleItem.button?.performClick(nil)
             toggleItem.menu = nil
@@ -769,30 +1080,61 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Hosting watchdog + self-repair
 
+    /// True when the window is parked outside every online display. A plain
+    /// `y < 0` test is wrong on multi-display setups: a monitor arranged below
+    /// or left of the main screen legitimately puts its menu bar windows at
+    /// negative global coordinates (that false positive is what fired the
+    /// repair alert daily on a 3-display arrangement).
+    private func windowIsParkedOffscreen(_ window: NSWindow) -> Bool {
+        let frame = window.frame
+        if window.screen != nil { return false }
+        return !NSScreen.screens.contains { $0.frame.intersects(frame) }
+    }
+
     /// Signature of the macOS 26 orphaning: the app runs, isVisible is true,
-    /// but the items' windows are parked off-screen (y < 0), screenless, or
-    /// crammed on top of each other at a display edge instead of being laid
-    /// out in the menu bar.
+    /// but the items' windows are parked outside every display or crammed on
+    /// top of each other at a display edge instead of being laid out in the
+    /// menu bar.
     private func itemsLookOrphaned() -> Bool {
         // The toggle dot must be sanely hosted in EVERY state (only the
         // separator's geometry is intentionally weird while collapsed). This
         // must not skip collapsed state: an orphaned separator still accepts a
         // 10,000 length, so a blind-while-collapsed watchdog never fires.
-        guard let toggleWindow = toggleItem.button?.window else { return true }
-        if toggleWindow.screen == nil { return true }
-        if toggleWindow.frame.origin.y < 0 { return true }
+        guard let toggleWindow = toggleItem.button?.window else {
+            NSLog("MenuBarBuddy: watchdog: toggle has no window")
+            return true
+        }
+        if windowIsParkedOffscreen(toggleWindow) {
+            NSLog("MenuBarBuddy: watchdog: toggle parked at \(toggleWindow.frame)")
+            return true
+        }
         guard !isCollapsed else { return false }
-        guard let separatorWindow = separatorItem.button?.window else { return true }
-        if separatorWindow.screen == nil { return true }
-        if separatorWindow.frame.origin.y < 0 { return true }
-        if toggleWindow.frame.intersects(separatorWindow.frame) { return true }
+        guard let separatorWindow = separatorItem.button?.window else {
+            NSLog("MenuBarBuddy: watchdog: separator has no window")
+            return true
+        }
+        if windowIsParkedOffscreen(separatorWindow) {
+            NSLog("MenuBarBuddy: watchdog: separator parked at \(separatorWindow.frame)")
+            return true
+        }
+        if toggleWindow.frame.intersects(separatorWindow.frame) {
+            NSLog("MenuBarBuddy: watchdog: items overlap (toggle \(toggleWindow.frame), separator \(separatorWindow.frame))")
+            return true
+        }
         return false
     }
 
     /// Escalating recovery: three consecutive positives (~15s) to rule out
     /// transient states, then recreate the items in-process (twice max), then
-    /// offer the bundle-ID self-repair once.
+    /// offer the bundle-ID self-repair once. Stands down entirely while the
+    /// screens are asleep, the session is locked, a display reconfiguration
+    /// just happened, or a mouse button is down (mid-drag geometry lies).
     private func checkHosting() {
+        guard !screensAsleep, !sessionLocked, Date() >= watchdogGraceUntil,
+              NSEvent.pressedMouseButtons == 0 else {
+            parkedStreak = 0
+            return
+        }
         guard itemsLookOrphaned() else {
             parkedStreak = 0
             return
@@ -800,6 +1142,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         parkedStreak += 1
         guard parkedStreak >= 3 else { return }
         parkedStreak = 0
+        // Isolated incidents days apart shouldn't accumulate into the alert:
+        // a real blacklisting re-orphans within seconds of a recreation.
+        if Date().timeIntervalSince(lastHostingRecoveryAt) > 24 * 3600 {
+            hostingRecoveryAttempts = 0
+        }
+        lastHostingRecoveryAt = Date()
         if hostingRecoveryAttempts < 2 {
             hostingRecoveryAttempts += 1
             recreateStatusItems()
@@ -810,6 +1158,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showRepairAlert() {
+        // The modal alert freezes every timer in the app until dismissed, so a
+        // relaunch (login items start daily) must not re-raise it on a stale
+        // grudge: at most one alert per 20h, persisted across restarts.
+        let lastAlertKey = "MenuBarBuddy.lastRepairAlertAt"
+        let last = UserDefaults.standard.double(forKey: lastAlertKey)
+        if last > 0, Date().timeIntervalSince1970 - last < 20 * 3600 {
+            NSLog("MenuBarBuddy: watchdog: suppressing repair alert (shown recently)")
+            return
+        }
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: lastAlertKey)
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
@@ -913,5 +1271,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         mouseTimer?.invalidate()
         NSApp.terminate(nil)
+    }
+
+    /// Every termination path must expand first — dying while collapsed is
+    /// what gets the bundle ID blacklisted. quitApp() and the signal handlers
+    /// already do; this catches the rest (AppleScript quit, logout).
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if isCollapsed {
+            expandMenuBar()
+        }
+        return .terminateNow
     }
 }

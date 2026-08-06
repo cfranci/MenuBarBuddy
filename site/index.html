@@ -4,14 +4,14 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>MenuBarBuddy: Hide your Mac menu bar clutter for $4.20</title>
-<meta name="description" content="A tiny, fast Mac menu bar tidier. Click one small green dot to hide the icons you do not need. Global hotkey, two-tone rainbow dot, and a self-healing watchdog built for macOS 26 Tahoe. One time $4.20. No subscription." />
+<meta name="description" content="A tiny, fast Mac menu bar tidier. Click one small green dot to hide the icons you do not need. Global hotkey, animated dot styles (Rainbow, Ocean, Lava, Aurora, custom color), and a self-healing watchdog built for macOS 26 Tahoe. One time $4.20. No subscription." />
 <link rel="canonical" href="https://cfranci.github.io/MenuBarBuddy" />
 
 <!-- Open Graph -->
 <meta property="og:type" content="website" />
 <meta property="og:site_name" content="MenuBarBuddy" />
 <meta property="og:title" content="MenuBarBuddy: a tidy Mac menu bar for $4.20" />
-<meta property="og:description" content="Click one small green dot to hide your menu bar clutter. Hotkey, two-tone rainbow dot, self-healing on macOS 26 Tahoe. One time $4.20, no subscription." />
+<meta property="og:description" content="Click one small green dot to hide your menu bar clutter. Hotkey, animated dot styles, self-healing on macOS 26 Tahoe. One time $4.20, no subscription." />
 <meta property="og:url" content="https://cfranci.github.io/MenuBarBuddy" />
 <meta property="og:image" content="assets/og.png" />
 <meta property="og:image:width" content="1200" />
@@ -20,7 +20,7 @@
 <!-- Twitter -->
 <meta name="twitter:card" content="summary_large_image" />
 <meta name="twitter:title" content="MenuBarBuddy: a tidy Mac menu bar for $4.20" />
-<meta name="twitter:description" content="Click one small green dot to hide your menu bar clutter. Hotkey, two-tone rainbow dot, self-healing on macOS 26 Tahoe. One time $4.20, no subscription." />
+<meta name="twitter:description" content="Click one small green dot to hide your menu bar clutter. Hotkey, animated dot styles, self-healing on macOS 26 Tahoe. One time $4.20, no subscription." />
 <meta name="twitter:image" content="assets/og.png" />
 
 <meta name="theme-color" content="#0a0a0c" />
@@ -196,27 +196,57 @@
   .toggle-item:hover { transform: scale(1.12); }
   .toggle-item:active { transform: scale(0.94); }
 
-  /* Classic dot: solid Apple system green, matches the real app */
+  /* Classic dot: solid Apple system green, matches the real app.
+     Styles set the two tones via CSS vars; motions animate the boundary,
+     approximating the app's makeStyledDotImage renderer. */
   .toggle-item .dot {
+    --dot-top: var(--green);
+    --dot-bottom: var(--green);
     display: block;
     width: 15px; height: 15px; border-radius: 50%;
-    background: var(--green);
+    background: linear-gradient(160deg, var(--dot-top) 0%, var(--dot-top) 42%, var(--dot-bottom) 58%, var(--dot-bottom) 100%);
+    background-size: 100% 200%;
+    background-position: 0% 50%;
     box-shadow: none;
     transition: filter 0.5s ease;
   }
 
-  /* Rainbow dot: two-tone dot with a drifting wavy boundary,
-     approximating the app's makeWaveDotImage (two hues a third of the wheel apart) */
-  .toggle-item.rainbow .dot {
-    background: linear-gradient(160deg, #ff5f6d 0%, #ff5f6d 42%, #4fc3f7 58%, #4fc3f7 100%);
-    background-size: 100% 200%;
-    animation: hue 8s linear infinite, wave 4s ease-in-out infinite;
-  }
+  /* ----- Styles (color families, same presets as the app) ----- */
+  .toggle-item.style-rainbow { animation: hue 8s linear infinite; }
+  .toggle-item.style-rainbow .dot { --dot-top: #ff5f6d; --dot-bottom: #4fc3f7; }
+  .toggle-item.style-ocean  .dot { --dot-top: #26c6da; --dot-bottom: #1565d8; }
+  .toggle-item.style-lava   .dot { --dot-top: #ffa726; --dot-bottom: #e53935; }
+  .toggle-item.style-aurora .dot { --dot-top: #4ade80; --dot-bottom: #a78bfa; }
   @keyframes hue { to { filter: hue-rotate(360deg); } }
+
+  /* ----- Motions (how the two tones move) -----
+     Motions LAYER: classes pick the gradient shape (spin's conic wins over
+     ripple's radial, over the default linear), JS composes the active
+     animations onto the .dot inline, and breathe scales the wrapper so it
+     never fights spin's rotate on the same transform. */
+  .dot-wrap { display: block; }
   @keyframes wave {
     0%, 100% { background-position: 0% 40%; }
     50% { background-position: 0% 60%; }
   }
+  .toggle-item.motion-ripple .dot {
+    background: radial-gradient(circle at 50% 50%, var(--dot-top) 0%, var(--dot-bottom) 55%, var(--dot-top) 100%);
+    background-position: center;
+  }
+  @keyframes ripple {
+    0%, 100% { background-size: 100% 100%; }
+    50% { background-size: 230% 230%; }
+  }
+  .toggle-item.motion-spin .dot {
+    background: conic-gradient(from 0deg, var(--dot-top), var(--dot-bottom), var(--dot-top));
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .toggle-item.motion-breathe .dot-wrap { animation: breathe 2.4s ease-in-out infinite; }
+  @keyframes breathe {
+    0%, 100% { transform: scale(0.82); }
+    50% { transform: scale(1.12); }
+  }
+  /* motion-steady: fixed split, no animation */
 
   /* COLLAPSED state: left-of-separator items vanish behind the separator */
   .menubar.collapsed .hideable {
@@ -227,9 +257,17 @@
     transform: translateX(24px) scale(0.7);
     pointer-events: none;
   }
-  /* The dot dims to grayed-out when collapsed and idle, vivid again on hover (HANDOFF) */
-  .menubar.collapsed .toggle-item .dot { filter: saturate(0.2) brightness(0.7); animation-play-state: paused; }
-  .menubar.collapsed:hover .toggle-item .dot { filter: none; animation-play-state: running; }
+  /* The dot dims to grayed-out when collapsed and idle, vivid again on hover
+     (HANDOFF). !important because JS drives .dot's animation inline, and the
+     inline shorthand would otherwise reset play-state to running. */
+  .menubar.collapsed .toggle-item,
+  .menubar.collapsed .toggle-item .dot-wrap,
+  .menubar.collapsed .toggle-item .dot { animation-play-state: paused !important; }
+  .menubar.collapsed .toggle-item .dot { filter: saturate(0.2) brightness(0.7); }
+  .menubar.collapsed:hover .toggle-item,
+  .menubar.collapsed:hover .toggle-item .dot-wrap,
+  .menubar.collapsed:hover .toggle-item .dot { animation-play-state: running !important; }
+  .menubar.collapsed:hover .toggle-item .dot { filter: none; }
 
   /* window body under the bar */
   .demo-body {
@@ -254,6 +292,13 @@
   }
   .demo-btn:hover { background: rgba(255,255,255,0.12); }
   .demo-btn.on { background: var(--green); color: #052b10; border-color: transparent; }
+  .demo-controls.appearance-row { border-top: none; padding-top: 0; gap: 7px; align-items: center; }
+  .demo-row-label {
+    font-size: 11px; font-weight: 640; text-transform: uppercase; letter-spacing: 0.1em;
+    color: var(--text-faint); min-width: 52px; text-align: right;
+  }
+  .demo-btn.chip { padding: 6px 13px; font-size: 12px; border-radius: 999px; }
+  .demo-btn.chip.on { background: var(--green); color: #052b10; border-color: transparent; }
   .demo-caption { text-align: center; font-size: 13px; color: var(--text-faint); margin-top: 14px; }
   .demo-caption kbd {
     font-family: var(--font); font-size: 12px; background: var(--surface-2);
@@ -484,7 +529,7 @@
             </span>
 
             <!-- The toggle: a small green dot by default, a two-tone rainbow dot in Rainbow mode -->
-            <span class="toggle-item" id="toggle" role="button" tabindex="0" aria-label="Toggle collapse" title="Click the dot to collapse or expand"><span class="dot"></span></span>
+            <span class="toggle-item" id="toggle" role="button" tabindex="0" aria-label="Toggle collapse" title="Click the dot to collapse or expand"><span class="dot-wrap"><span class="dot"></span></span></span>
 
             <span class="status-item" style="font-variant-numeric: tabular-nums;">9:41</span>
           </div>
@@ -495,13 +540,29 @@
         </div>
         <div class="demo-controls">
           <button class="demo-btn" id="btn-toggle">Collapse the menu bar</button>
-          <button class="demo-btn" id="btn-rainbow">&#127752; Rainbow dot: off</button>
+        </div>
+        <div class="demo-controls appearance-row" id="styleRow" aria-label="Dot style">
+          <span class="demo-row-label">Style</span>
+          <button class="demo-btn chip on" data-style="classic">Classic</button>
+          <button class="demo-btn chip" data-style="rainbow">&#127752; Rainbow</button>
+          <button class="demo-btn chip" data-style="ocean">Ocean</button>
+          <button class="demo-btn chip" data-style="lava">Lava</button>
+          <button class="demo-btn chip" data-style="aurora">Aurora</button>
+        </div>
+        <div class="demo-controls appearance-row" id="motionRow" aria-label="Dot motion">
+          <span class="demo-row-label">Motion</span>
+          <button class="demo-btn chip on" data-motion="wave">Wave</button>
+          <button class="demo-btn chip" data-motion="ripple">Ripple</button>
+          <button class="demo-btn chip" data-motion="spin">Spin</button>
+          <button class="demo-btn chip" data-motion="breathe">Breathe</button>
+          <button class="demo-btn chip" data-motion="steady">Steady</button>
         </div>
       </div>
     </div>
     <p class="demo-caption">
       This is a live demo, not a picture. In the real app the same toggle is on the global hotkey
-      <kbd>Ctrl</kbd> <kbd>Opt</kbd> <kbd>Space</kbd>. By default the toggle is a small green dot, and you can turn on Rainbow Dot for the animated two-tone version.
+      <kbd>Ctrl</kbd> <kbd>Opt</kbd> <kbd>Space</kbd>. Pick a Style, then stack as many Motions as
+      you like (try Spin + Breathe), exactly like the app's Appearance menu.
     </p>
   </div>
 </header>
@@ -529,7 +590,7 @@
       <div class="step">
         <div class="num">3</div>
         <h3>Make it yours</h3>
-        <p>Right-click for the menu. Turn on the two-tone rainbow dot, and set it to start at login. Done.</p>
+        <p>Right-click for the menu. Pick a dot style, motion, and speed in Appearance, and set it to start at login. Done.</p>
       </div>
     </div>
   </div>
@@ -552,7 +613,7 @@
         <div class="ficon">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#ff375f" stroke-width="2"><circle cx="12" cy="12" r="8"/></svg>
         </div>
-        <h3>Rainbow dot</h3>
+        <h3>Make the dot yours</h3>
         <p>An optional two-tone dot: two hues a third of the wheel apart, blended along a wavy boundary that drifts as they phase through the spectrum. Vivid when active, softly grayed when idle.</p>
       </div>
       <div class="feature">
@@ -560,7 +621,7 @@
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#0a84ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"/></svg>
         </div>
         <h3>Choose your look</h3>
-        <p>Run the classic green dot or flip on the animated rainbow. The look is yours, right from the menu.</p>
+        <p>Classic green, Rainbow, Ocean, Lava, Aurora, or any color you pick. Five motions (wave, ripple, spin, breathe, steady) and three speeds, right from the menu.</p>
       </div>
       <div class="feature">
         <div class="ficon">
@@ -683,7 +744,7 @@
             <td><span class="cmp-no">No</span></td>
           </tr>
           <tr>
-            <th scope="row">Global hotkey and rainbow dot</th>
+            <th scope="row">Global hotkey and animated dot styles</th>
             <td class="us"><span class="cmp-yes">Yes</span></td>
             <td>Some</td>
             <td>Some</td>
@@ -714,7 +775,7 @@
         <div class="once">one time payment</div>
         <ul class="price-list">
           <li><span class="check">&#10003;</span> Collapse and expand with one click or the hotkey</li>
-          <li><span class="check">&#10003;</span> Classic green dot or the animated rainbow</li>
+          <li><span class="check">&#10003;</span> Five dot styles, five motions, any custom color</li>
           <li><span class="check">&#10003;</span> Start at login and Cmd-drag arranging</li>
           <li><span class="check">&#10003;</span> Tahoe-proof self-healing watchdog</li>
           <li><span class="check">&#10003;</span> All future updates, free</li>
@@ -847,11 +908,51 @@
     });
     btnToggle.addEventListener("click", toggle);
 
-    btnRainbow.addEventListener("click", function () {
-      var on = toggleEl.classList.toggle("rainbow");
-      btnRainbow.classList.toggle("on", on);
-      btnRainbow.innerHTML = on ? "🌈 Rainbow dot: on" : "🌈 Rainbow dot: off";
+    // Appearance chips, same as the app's Appearance menu: Style is
+    // single-select, Motions LAYER (toggle any combination on together).
+    var dotEl = toggleEl.querySelector(".dot");
+    var motionAnims = {
+      wave: "wave 4s ease-in-out infinite",
+      ripple: "ripple 2.6s ease-in-out infinite",
+      spin: "spin 3s linear infinite"
+      // breathe animates the wrapper via its class; steady is static
+    };
+
+    document.getElementById("styleRow").addEventListener("click", function (e) {
+      var chip = e.target.closest("[data-style]");
+      if (!chip) return;
+      var value = chip.getAttribute("data-style");
+      toggleEl.className = toggleEl.className
+        .split(/\s+/)
+        .filter(function (c) { return c.indexOf("style-") !== 0; })
+        .join(" ");
+      if (value !== "classic") toggleEl.classList.add("style-" + value);
+      this.querySelectorAll(".chip").forEach(function (c) { c.classList.remove("on"); });
+      chip.classList.add("on");
+      toggleEl.dataset.userTouched = "1";
     });
+
+    function applyMotions() {
+      var anims = [];
+      document.querySelectorAll("#motionRow .chip.on").forEach(function (c) {
+        var m = c.getAttribute("data-motion");
+        toggleEl.classList.add("motion-" + m);
+        if (motionAnims[m]) anims.push(motionAnims[m]);
+      });
+      dotEl.style.animation = anims.join(", ");
+    }
+    document.getElementById("motionRow").addEventListener("click", function (e) {
+      var chip = e.target.closest("[data-motion]");
+      if (!chip) return;
+      chip.classList.toggle("on");
+      toggleEl.className = toggleEl.className
+        .split(/\s+/)
+        .filter(function (c) { return c.indexOf("motion-") !== 0; })
+        .join(" ");
+      applyMotions();
+      toggleEl.dataset.userTouched = "1";
+    });
+    applyMotions();   // wave starts .on in the markup, matching the app default
 
     // Gentle auto-demo loop so a passive visitor still sees it work.
     // Single interval with a run counter; yields the moment the user interacts.
@@ -862,7 +963,7 @@
         toggle();
         runs += 0.5; // one full collapse+expand cycle counts as one run
       }, 2600);
-      [toggleEl, btnToggle, btnRainbow].forEach(function (el) {
+      [toggleEl, btnToggle].forEach(function (el) {
         el.addEventListener("click", function () { toggleEl.dataset.userTouched = "1"; });
       });
     }
