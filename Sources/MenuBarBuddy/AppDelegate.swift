@@ -3,15 +3,47 @@ import SwiftUI
 import HotKey
 import ServiceManagement
 import ExceptionShield
+import CoreImage
 
-/// Color families for the toggle dot. Every non-classic style renders through
-/// the animated two-tone engine; classic keeps the original green/gray fade.
+private extension NSColor {
+    var hexString: String {
+        guard let c = usingColorSpace(.deviceRGB) else { return "#808080" }
+        return String(format: "#%02X%02X%02X",
+                      Int(c.redComponent * 255),
+                      Int(c.greenComponent * 255),
+                      Int(c.blueComponent * 255))
+    }
+    convenience init?(hexString hex: String) {
+        let s = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
+        guard s.count == 6, let v = UInt32(s, radix: 16) else { return nil }
+        self.init(red:   CGFloat((v >> 16) & 0xFF) / 255,
+                  green: CGFloat((v >> 8)  & 0xFF) / 255,
+                  blue:  CGFloat(v & 0xFF) / 255,
+                  alpha: 1.0)
+    }
+}
+
+// MARK: - CollapseGroup
+
+struct CollapseGroup {
+    var color: NSColor
+    var name: String
+
+    static let defaults: [CollapseGroup] = [
+        CollapseGroup(color: NSColor(red: 0.70, green: 0.40, blue: 0.90, alpha: 1.0), name: "Purple"),
+        CollapseGroup(color: NSColor(red: 0.47, green: 0.90, blue: 0.78, alpha: 1.0), name: "Green"),
+        CollapseGroup(color: NSColor(red: 0.95, green: 0.40, blue: 0.40, alpha: 1.0), name: "Red"),
+    ]
+}
+
+// MARK: - Appearance enums
+
 enum DotStyle: String, CaseIterable {
     case classic, rainbow, ocean, lava, aurora, custom
 
     var title: String {
         switch self {
-        case .classic: return "Classic Green"
+        case .classic: return "Classic"
         case .rainbow: return "Rainbow"
         case .ocean:   return "Ocean"
         case .lava:    return "Lava"
@@ -20,8 +52,6 @@ enum DotStyle: String, CaseIterable {
         }
     }
 
-    /// (baseHue, drift range, top/bottom hue offset). Rainbow ignores these
-    /// and cycles the full wheel; custom substitutes the user's hue.
     var palette: (base: CGFloat, drift: CGFloat, offset: CGFloat) {
         switch self {
         case .ocean:  return (0.55, 0.07, 0.06)
@@ -32,7 +62,6 @@ enum DotStyle: String, CaseIterable {
     }
 }
 
-/// How the two tones move inside the dot.
 enum DotMotion: String, CaseIterable {
     case wave, ripple, spin, breathe, steady
 
@@ -67,40 +96,52 @@ enum DotSpeed: String, CaseIterable {
     }
 }
 
+// MARK: - AppDelegate
+
 class AppDelegate: NSObject, NSApplicationDelegate {
-    // Created FIRST = rightmost = always visible (just like Hidden Bar's btnExpandCollapse)
-    // (var, not let: the hosting watchdog can recreate them if the menu bar
-    // host orphans them)
-    private var toggleItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-    // Created SECOND = to the left of toggle = this expands (just like Hidden Bar's btnSeparate)
-    private var separatorItem = NSStatusBar.system.statusItem(withLength: 1)
+
+    // Status items — created in applicationDidFinishLaunching in order:
+    // toggleItem (1st = rightmost), then separators rightmost-first so that
+    // separatorItems[0] ends up leftmost in the menu bar.
+    private var toggleItem: NSStatusItem!
+    private var separatorItems: [NSStatusItem] = []
+
+    // Multi-group collapse state
+    // currentStep = 0: fully expanded
+    // currentStep = k (1..N): groups 0..(k-1) are hidden
+    // currentStep = N: all groups hidden (nuclear)
+    private var currentStep: Int = 0
+    private var groups: [CollapseGroup] = []
+    private var lastPressTime: Date = .distantPast
+    private var lastClickTime: Date = .distantPast
+    private let cycleTimeoutSeconds: TimeInterval = 60.0
 
     private var settingsWindow: NSWindow?
     private var contextMenu: NSMenu!
     private var startAtLoginMenuItem: NSMenuItem?
     private var appearanceMenu: NSMenu?
     private var rainbowTimer: Timer?
-    private var rainbowHue: CGFloat = 0.45  // start near the classic mint
+    private var rainbowHue: CGFloat = 0.45
     private var rainbowWavePhase: CGFloat = 0
-    private var palettePhase: CGFloat = 0   // slow drift for themed palettes
+    private var palettePhase: CGFloat = 0
     private var hotKey: HotKey?
     private var mouseMonitor: Any?
     private var mouseTimer: Timer?
     private var colorAnimTimer: Timer?
-    private var currentDotAlpha: CGFloat = 0.0  // 0 = gray, 1 = green
+    private var collapseStepTimer: Timer?
+    private var coverPanel: NSPanel?
+    private let barHider = MBBarHider()
+
+    private var currentDotAlpha: CGFloat = 0.0
     private var targetDotAlpha: CGFloat = 0.0
     private var sigtermSource: DispatchSourceSignal?
     private var sigintSource: DispatchSourceSignal?
 
-    // Watchdog state (see pollMouseLocation)
     private var pollTick = 0
     private var misorderStreak = 0
     private var parkedStreak = 0
     private var hostingRecoveryAttempts = 0
     private var repairAlertShown = false
-    // Display sleep, screen lock, and display reconfiguration all move or
-    // detach status item windows transiently; the watchdog must stand down
-    // through them or every overnight idle looks like an orphaning.
     private var watchdogGraceUntil = Date.distantPast
     private var screensAsleep = false
     private var sessionLocked = false
@@ -110,25 +151,69 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var collapseLength: CGFloat = 2000
     private let expandedLength: CGFloat = 12
 
-    // Preferred positions are distances from the screen's RIGHT edge, so a
-    // smaller value means further right. The toggle must always stay to the
-    // right of the separator (togglePos < separatorPos) or collapsing would
-    // hide the toggle itself with no visible way back.
-    private let togglePositionKey = "NSStatusItem Preferred Position mbb3-toggle"
-    private let separatorPositionKey = "NSStatusItem Preferred Position mbb3-separator"
+    // Position keys — distances from screen right edge
+    private let togglePositionKey   = "NSStatusItem Preferred Position mbb3-toggle"
+    private let sep0PositionKey     = "NSStatusItem Preferred Position mbb3-sep-0"
+    private let sep1PositionKey     = "NSStatusItem Preferred Position mbb3-sep-1"
+    private let sep2PositionKey     = "NSStatusItem Preferred Position mbb3-sep-2"
 
-    // Dot colors
-    private let greenColor = NSColor(red: 120/255, green: 230/255, blue: 200/255, alpha: 1.0)
+    // Dot colors (classic mode)
     private let grayColor = NSColor(red: 0.45, green: 0.45, blue: 0.45, alpha: 1.0)
     private var mouseInMenuBar = false
 
-    private var isCollapsed: Bool {
-        return separatorItem.length > expandedLength
+    private var isCollapsed: Bool { currentStep > 0 }
+
+    private var showSeparatorLines: Bool {
+        get {
+            return UserDefaults.standard.object(forKey: "MenuBarBuddy.showLines") == nil
+                ? true
+                : UserDefaults.standard.bool(forKey: "MenuBarBuddy.showLines")
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "MenuBarBuddy.showLines") }
+    }
+    private var hideSystemClock: Bool {
+        get { UserDefaults.standard.bool(forKey: "MenuBarBuddy.hideSystemClock") }
+        set { UserDefaults.standard.set(newValue, forKey: "MenuBarBuddy.hideSystemClock") }
+    }
+    private var hideControlCenter: Bool {
+        get { UserDefaults.standard.bool(forKey: "MenuBarBuddy.hideControlCenter") }
+        set { UserDefaults.standard.set(newValue, forKey: "MenuBarBuddy.hideControlCenter") }
+    }
+    private var showLinesMenuItem: NSMenuItem?
+    private var hideClockMenuItem: NSMenuItem?
+    private var hideCCMenuItem: NSMenuItem?
+
+    // The rightmost group's color drives the dot in classic mode
+    private var activeDotColor: NSColor {
+        groups.last?.color ?? NSColor(red: 120/255, green: 230/255, blue: 200/255, alpha: 1.0)
     }
 
+    // MARK: - Launch
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // A second instance would register a duplicate set of status items.
         terminateIfDuplicateInstance()
+
+        // Request Accessibility access so we can read menu bar item positions
+        // via AXUIElement (kAXExtrasMenuBarAttribute). Without this, partial
+        // collapses fall back to allowing all apps (groups don't hide selectively).
+        mbbLog("MBB launch: AXIsProcessTrusted=\(AXIsProcessTrusted())")
+        if !AXIsProcessTrusted() {
+            let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+            AXIsProcessTrustedWithOptions(opts)
+        }
+
+        groups = loadGroups()
+        if UserDefaults.standard.array(forKey: "MenuBarBuddy.groups") == nil {
+            saveGroups()
+        }
+
+        // Create status items in the correct order: toggle first (rightmost),
+        // then separators rightmost-to-leftmost (using insert-at-0 so
+        // separatorItems[0] = leftmost, separatorItems[N-1] = rightmost).
+        toggleItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        for _ in 0..<groups.count {
+            separatorItems.insert(NSStatusBar.system.statusItem(withLength: 1), at: 0)
+        }
 
         updateCollapseLength()
         setupUI()
@@ -158,16 +243,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             setbuf(stdout, nil)
             func report(_ tag: String) {
                 let tf = toggleItem.button?.window?.frame ?? .zero
-                let sf = separatorItem.button?.window?.frame ?? .zero
+                let sf = separatorItems.first?.button?.window?.frame ?? .zero
                 print("\(tag) toggle=\(Int(tf.origin.x)),\(Int(tf.origin.y)) \(Int(tf.width))w separ=\(Int(sf.origin.x)),\(Int(sf.origin.y)) \(Int(sf.width))w")
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [self] in
                 report("before-bounce:")
                 toggleItem.isVisible = false
-                separatorItem.isVisible = false
+                for item in separatorItems { item.isVisible = false }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [self] in
                     toggleItem.isVisible = true
-                    separatorItem.isVisible = true
+                    for item in separatorItems { item.isVisible = true }
                 }
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [self] in
@@ -180,7 +265,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             var tick = 0
             Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [self] _ in
                 tick += 1
-                print("t+\(tick)s rainbowOn=\(rainbowEnabled) timer=\(rainbowTimer != nil) collapsed=\(isCollapsed) mouseInBar=\(mouseInMenuBar) alpha=\(String(format: "%.2f", currentDotAlpha)) hue=\(String(format: "%.2f", rainbowHue)) len=\(Int(separatorItem.length))")
+                print("t+\(tick)s rainbowOn=\(rainbowEnabled) timer=\(rainbowTimer != nil) collapsed=\(isCollapsed) mouseInBar=\(mouseInMenuBar) alpha=\(String(format: "%.2f", currentDotAlpha)) hue=\(String(format: "%.2f", rainbowHue)) len=\(Int(separatorItems.first?.length ?? 0))")
                 if tick >= 12 { quitApp() }
             }
         }
@@ -190,9 +275,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [self] _ in
                 tick += 1
                 let tf = toggleItem.button?.window?.frame ?? .zero
-                let sf = separatorItem.button?.window?.frame ?? .zero
-                print("t+\(tick)s toggle: vis=\(toggleItem.isVisible) len=\(Int(toggleItem.length)) frame=\(Int(tf.origin.x)),\(Int(tf.origin.y)) \(Int(tf.width))x\(Int(tf.height)) onScreen=\(toggleItem.button?.window?.isOnActiveSpace ?? false)")
-                print("t+\(tick)s separ:  vis=\(separatorItem.isVisible) len=\(Int(separatorItem.length)) frame=\(Int(sf.origin.x)),\(Int(sf.origin.y)) \(Int(sf.width))x\(Int(sf.height))")
+                let sf = separatorItems.first?.button?.window?.frame ?? .zero
+                print("t+\(tick)s toggle: vis=\(toggleItem.isVisible) len=\(Int(toggleItem.length)) frame=\(Int(tf.origin.x)),\(Int(tf.origin.y)) \(Int(tf.width))x\(Int(tf.height))")
+                print("t+\(tick)s sep[0]: vis=\(separatorItems.first?.isVisible ?? false) len=\(Int(separatorItems.first?.length ?? 0)) frame=\(Int(sf.origin.x)),\(Int(sf.origin.y)) \(Int(sf.width))x\(Int(sf.height))")
                 if tick >= 5 { quitApp() }
             }
         }
@@ -200,8 +285,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             setbuf(stdout, nil)
             print("TEST: launched, collapsing in 4s")
             DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [self] in
-                collapseMenuBar()
-                print("TEST: collapsed, length=\(Int(separatorItem.length)) readback frame=\(separatorItem.button?.window?.frame ?? .zero)")
+                collapseMenuBar(step: 1)
+                print("TEST: collapse started, len=\(Int(separatorItems.first?.length ?? 0))")
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [self] in
+                let frame = separatorItems.first?.button?.window?.frame ?? .zero
+                print("TEST: collapsed frame=\(frame) isCollapsed=\(isCollapsed) step=\(currentStep)")
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [self] in
                 expandMenuBar()
@@ -226,9 +315,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Dying uncleanly while the menu bar host is touching one of our items is
-    /// what gets the bundle ID blacklisted, so turn SIGTERM/SIGINT (pkill,
-    /// Ctrl-C, logout) into a graceful expand-and-quit.
     private func setupSignalHandlers() {
         signal(SIGTERM, SIG_IGN)
         signal(SIGINT, SIG_IGN)
@@ -246,8 +332,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         SMAppService.mainApp.status == .enabled
     }
 
-    /// After a self-repair the bundle ID changes, which invalidates the old
-    /// login item registration; re-register if the user had it on.
     private func reassertStartAtLogin() {
         guard UserDefaults.standard.bool(forKey: "MenuBarBuddy.startAtLogin"),
               !startAtLoginEnabled else { return }
@@ -267,6 +351,54 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             NSLog("MenuBarBuddy: Start at Login toggle failed: \(error)")
         }
         startAtLoginMenuItem?.state = startAtLoginEnabled ? .on : .off
+    }
+
+    // MARK: - Show Lines / System Items toggles
+
+    @objc private func toggleShowLines() {
+        showSeparatorLines = !showSeparatorLines
+        showLinesMenuItem?.state = showSeparatorLines ? .on : .off
+        updateSeparatorVisibility()
+    }
+
+    @objc private func toggleHideClock() {
+        hideSystemClock = !hideSystemClock
+        hideClockMenuItem?.state = hideSystemClock ? .on : .off
+    }
+
+    @objc private func toggleHideCC() {
+        hideControlCenter = !hideControlCenter
+        hideCCMenuItem?.state = hideControlCenter ? .on : .off
+    }
+
+    // MARK: - Group persistence
+
+    private func saveGroups() {
+        let dicts = groups.map { ["name": $0.name, "hex": $0.color.hexString] }
+        UserDefaults.standard.set(dicts, forKey: "MenuBarBuddy.groups")
+    }
+
+    private func loadGroups() -> [CollapseGroup] {
+        guard let saved = UserDefaults.standard.array(forKey: "MenuBarBuddy.groups") as? [[String: String]] else {
+            return CollapseGroup.defaults
+        }
+        let loaded = saved.compactMap { d -> CollapseGroup? in
+            guard let name = d["name"],
+                  let hex = d["hex"],
+                  let color = NSColor(hexString: hex) else { return nil }
+            return CollapseGroup(color: color, name: name)
+        }
+        return loaded.isEmpty ? CollapseGroup.defaults : loaded
+    }
+
+    private func buildSysItemsArray() -> [NSNumber] {
+        var items: [NSNumber] = []
+        for i in 1...8 {
+            if i == 1 && hideSystemClock { continue }   // 1 = Date/Time clock
+            if i == 6 && hideControlCenter { continue } // 6 = Control Center (best guess)
+            items.append(NSNumber(value: i))
+        }
+        return items
     }
 
     // MARK: - Debug test harness (--test-collapse)
@@ -289,14 +421,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         print("TEST: macOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
         print("TEST: screen visibleFrame width = \(NSScreen.main?.visibleFrame.width ?? -1)")
         dumpStatusWindows("baseline")
+        let sep = separatorItems[0]
         var delay: TimeInterval = 2
         for len in lengths {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [self] in
-                separatorItem.button?.attributedTitle = NSAttributedString(string: "")
-                separatorItem.length = len
+                sep.button?.attributedTitle = NSAttributedString(string: "")
+                sep.length = len
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [self] in
-                    let readback = separatorItem.length
-                    let frame = separatorItem.button?.window?.frame ?? .zero
+                    let readback = sep.length
+                    let frame = sep.button?.window?.frame ?? .zero
                     print("TEST: set=\(Int(len)) readback=\(Int(readback)) windowFrame=x:\(Int(frame.origin.x)) w:\(Int(frame.width))")
                     dumpStatusWindows("len\(Int(len))")
                 }
@@ -310,25 +443,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateCollapseLength() {
-        // macOS 26 (Tahoe) enforces a hard maximum of 10_000 on
-        // NSStatusItem.length and throws NSInvalidArgumentException above it.
         let screenWidth = NSScreen.main?.visibleFrame.width ?? 1728
         collapseLength = min(10_000, max(500, screenWidth * 2.5 * CGFloat(settingsStore.pushMultiplier)))
     }
 
     @objc private func screenChanged() {
         updateCollapseLength()
-        // Displays connecting/disconnecting/mirroring (external monitors, TVs,
-        // Sidecar, virtual displays) shuffle status item windows for several
-        // seconds. Never count those frames as orphaning.
         deferWatchdog(seconds: 60)
     }
 
-    /// Suspend the hosting watchdog while the machine is in a state where
-    /// status item geometry is meaningless, and give it a grace period after
-    /// coming back. Without this, an overnight display sleep or a lock screen
-    /// reliably racked up 3 "orphaned" ticks and ended in a bogus repair alert
-    /// (the bundle ID climbed v6 -> v10 in one week that way).
     private func setupWatchdogSuppression() {
         let workspace = NSWorkspace.shared.notificationCenter
         workspace.addObserver(self, selector: #selector(screensDidSleep),
@@ -350,25 +473,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         misorderStreak = 0
     }
 
-    @objc private func screensDidSleep() {
-        screensAsleep = true
-        parkedStreak = 0
-    }
-
-    @objc private func screensDidWake() {
-        screensAsleep = false
-        deferWatchdog(seconds: 60)
-    }
-
-    @objc private func sessionLockedNotification() {
-        sessionLocked = true
-        parkedStreak = 0
-    }
-
-    @objc private func sessionUnlockedNotification() {
-        sessionLocked = false
-        deferWatchdog(seconds: 30)
-    }
+    @objc private func screensDidSleep() { screensAsleep = true; parkedStreak = 0 }
+    @objc private func screensDidWake()  { screensAsleep = false; deferWatchdog(seconds: 60) }
+    @objc private func sessionLockedNotification()   { sessionLocked = true; parkedStreak = 0 }
+    @objc private func sessionUnlockedNotification() { sessionLocked = false; deferWatchdog(seconds: 30) }
 
     private func setupHotKey() {
         hotKey = HotKey(key: .space, modifiers: [.control, .option])
@@ -392,8 +500,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return img
     }
 
-    private func makeSeparatorImage(height: CGFloat = 18) -> NSImage {
-        let width: CGFloat = 2
+    // Single colored | line — used for the leftmost visible separator
+    private func makeLeftSeparatorImage(color: NSColor, height: CGFloat = 18) -> NSImage {
+        let width: CGFloat = 6
         let img = NSImage(size: NSSize(width: width, height: height))
         img.lockFocus()
         let barWidth: CGFloat = 1.5
@@ -401,18 +510,36 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let x = (width - barWidth) / 2
         let y = (height - barHeight) / 2
         let rect = NSRect(x: x, y: y, width: barWidth, height: barHeight)
-        NSColor(white: 1.0, alpha: 0.35).setFill()
+        color.withAlphaComponent(0.70).setFill()
         NSBezierPath(roundedRect: rect, xRadius: barWidth / 2, yRadius: barWidth / 2).fill()
         img.unlockFocus()
         img.isTemplate = false
         return img
     }
 
-    /// Two-tone animated dot: one hue on top, another below, blended along a
-    /// moving boundary. Motions layer: each active motion contributes a blend
-    /// component and they are averaged per-pixel, so wave + spin + ripple all
-    /// show at once; breathe modulates the radius independently. Rendered
-    /// per-pixel into a small retina bitmap (36x36 px, trivial at 20fps).
+    // Double colored || line — used for separators between two visible groups
+    private func makeDoubleSeparatorImage(leftColor: NSColor, rightColor: NSColor, height: CGFloat = 18) -> NSImage {
+        let width: CGFloat = 10
+        let img = NSImage(size: NSSize(width: width, height: height))
+        img.lockFocus()
+        let barWidth: CGFloat = 1.5
+        let barHeight: CGFloat = 12
+        let gap: CGFloat = 2.5
+        let totalW = barWidth * 2 + gap
+        let startX = (width - totalW) / 2
+        let y = (height - barHeight) / 2
+        leftColor.withAlphaComponent(0.70).setFill()
+        NSBezierPath(roundedRect: NSRect(x: startX, y: y, width: barWidth, height: barHeight),
+                     xRadius: barWidth / 2, yRadius: barWidth / 2).fill()
+        rightColor.withAlphaComponent(0.70).setFill()
+        NSBezierPath(roundedRect: NSRect(x: startX + barWidth + gap, y: y, width: barWidth, height: barHeight),
+                     xRadius: barWidth / 2, yRadius: barWidth / 2).fill()
+        img.unlockFocus()
+        img.isTemplate = false
+        return img
+    }
+
+    // Two-tone animated dot
     private func makeStyledDotImage(topColor: NSColor, bottomColor: NSColor, wavePhase: CGFloat,
                                     motions: Set<DotMotion>, size: CGFloat = 18) -> NSImage {
         let scale: CGFloat = 2
@@ -426,58 +553,50 @@ class AppDelegate: NSObject, NSApplicationDelegate {
               let bytes = rep.bitmapData else {
             return makeDotImage(color: topColor, size: size)
         }
-        var dotRadius = 4.5 * scale               // same 9pt dot as the classic image
+        var dotRadius = 4.5 * scale
         if motions.contains(.breathe) {
-            // The whole dot swells and shrinks; layers under any boundary motion.
             dotRadius *= 0.88 + 0.12 * sin(wavePhase)
         }
         let center = CGFloat(px) / 2
-        let amplitude = dotRadius * 0.35          // wave height
-        let blendBand = dotRadius * 0.9           // soft gradient thickness
+        let amplitude = dotRadius * 0.35
+        let blendBand = dotRadius * 0.9
         let bytesPerRow = rep.bytesPerRow
         let (tr, tg, tb) = (top.redComponent, top.greenComponent, top.blueComponent)
         let (br, bg, bb) = (bottom.redComponent, bottom.greenComponent, bottom.blueComponent)
         for y in 0..<px {
             for x in 0..<px {
                 let dx = CGFloat(x) + 0.5 - center
-                let dy = CGFloat(y) + 0.5 - center    // positive = below center (bitmap is top-down)
+                let dy = CGFloat(y) + 0.5 - center
                 let dist = (dx * dx + dy * dy).squareRoot()
-                let alpha = max(0, min(1, dotRadius - dist + 0.5))   // 1px antialiased rim
+                let alpha = max(0, min(1, dotRadius - dist + 0.5))
                 let offset = y * bytesPerRow + x * 4
                 if alpha <= 0 {
                     bytes[offset] = 0; bytes[offset + 1] = 0; bytes[offset + 2] = 0; bytes[offset + 3] = 0
                     continue
                 }
-                // Blend factor: 0 = top color, 1 = bottom color. Each active
-                // motion contributes a component; the average layers them.
                 var components: [CGFloat] = []
                 if motions.contains(.wave) {
-                    // Wavy boundary: crosses the middle, drifting with wavePhase.
                     let wave = amplitude * sin((dx / dotRadius) * .pi * 1.4 + wavePhase)
                     var tw = (dy - wave) / blendBand + 0.5
                     tw = max(0, min(1, tw))
-                    components.append(tw * tw * (3 - 2 * tw))        // smoothstep
+                    components.append(tw * tw * (3 - 2 * tw))
                 }
                 if motions.contains(.ripple) {
-                    // Concentric rings flowing outward from the center.
                     components.append(0.5 + 0.5 * sin((dist / dotRadius) * .pi * 2.2 - wavePhase * 2))
                 }
                 if motions.contains(.spin) {
-                    // A two-tone gradient rotating around the center.
                     components.append(0.5 + 0.5 * sin(atan2(dy, dx) + wavePhase))
                 }
                 if motions.contains(.steady) {
-                    // Fixed soft horizontal split, no movement.
                     var ts = dy / blendBand + 0.5
                     ts = max(0, min(1, ts))
                     components.append(ts * ts * (3 - 2 * ts))
                 }
-                // Breathe alone (or nothing) = solid top color.
                 let t = components.isEmpty ? 0 : components.reduce(0, +) / CGFloat(components.count)
                 let r = tr + (br - tr) * t
                 let g = tg + (bg - tg) * t
                 let b = tb + (bb - tb) * t
-                bytes[offset]     = UInt8(r * alpha * 255)           // premultiplied RGBA
+                bytes[offset]     = UInt8(r * alpha * 255)
                 bytes[offset + 1] = UInt8(g * alpha * 255)
                 bytes[offset + 2] = UInt8(b * alpha * 255)
                 bytes[offset + 3] = UInt8(alpha * 255)
@@ -488,9 +607,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return img
     }
 
-    // MARK: - Appearance (dot style / motion / speed)
+    // MARK: - Appearance
 
-    /// Kept for back-compat: older builds persisted a single Rainbow Dot flag.
     private var rainbowEnabled: Bool {
         get { UserDefaults.standard.bool(forKey: "MenuBarBuddy.rainbowDot") }
         set { UserDefaults.standard.set(newValue, forKey: "MenuBarBuddy.rainbowDot") }
@@ -502,18 +620,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                let style = DotStyle(rawValue: raw) {
                 return style
             }
-            return rainbowEnabled ? .rainbow : .classic   // pre-appearance builds
+            return rainbowEnabled ? .rainbow : .classic
         }
         set {
             UserDefaults.standard.set(newValue.rawValue, forKey: "MenuBarBuddy.dotStyle")
-            rainbowEnabled = newValue != .classic         // keep the old flag coherent
+            rainbowEnabled = newValue != .classic
         }
     }
 
-    /// Motions LAYER: any combination can be active at once (wave + spin +
-    /// breathe, etc.). Persisted as a comma-joined list; a bare single value
-    /// from older builds parses the same way. nil = default [wave]; an empty
-    /// string is a deliberate "no motion" (solid dot).
     private var dotMotions: Set<DotMotion> {
         get {
             guard let raw = UserDefaults.standard.string(forKey: "MenuBarBuddy.dotMotion") else { return [.wave] }
@@ -534,11 +648,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         set { UserDefaults.standard.set(newValue.rawValue, forKey: "MenuBarBuddy.dotSpeed") }
     }
 
-    /// Hue (0..1) for the Custom style, set from the color panel.
     private var customDotHue: CGFloat {
         get {
             let saved = UserDefaults.standard.double(forKey: "MenuBarBuddy.customDotHue")
-            return saved > 0 ? CGFloat(saved) : 0.75      // default: purple
+            return saved > 0 ? CGFloat(saved) : 0.75
         }
         set { UserDefaults.standard.set(Double(newValue), forKey: "MenuBarBuddy.customDotHue") }
     }
@@ -560,13 +673,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func rainbowTick() {
         let speed = dotSpeed.multiplier
         let style = dotStyle
-        // Full hue cycle roughly every 8 seconds (rainbow only).
         rainbowHue = (rainbowHue + speed * 0.05 / 8.0).truncatingRemainder(dividingBy: 1.0)
-        // Themed palettes drift slowly around their base hue instead.
         palettePhase = (palettePhase + speed * 0.05 * 2 * .pi / 10).truncatingRemainder(dividingBy: 2 * .pi)
-        // Same vividness rule as the classic dot: vivid when expanded or
-        // hovered, grayed out when collapsed and idle. currentDotAlpha eases
-        // between the two so state changes fade instead of snapping.
         let target: CGFloat = (!isCollapsed || mouseInMenuBar) ? 1.0 : 0.0
         let step: CGFloat = 0.06
         if currentDotAlpha < target {
@@ -576,13 +684,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let saturation = 0.15 + 0.75 * currentDotAlpha
         let brightness = 0.55 + 0.45 * currentDotAlpha
-        // Boundary movement: ~one sweep every 4 seconds at normal speed.
         rainbowWavePhase = (rainbowWavePhase + speed * 0.05 * 2 * .pi / 4).truncatingRemainder(dividingBy: 2 * .pi)
 
         let topHue: CGFloat
         let bottomHue: CGFloat
         switch style {
-        case .rainbow, .classic:
+        case .rainbow:
             topHue = rainbowHue
             bottomHue = (rainbowHue + 0.33).truncatingRemainder(dividingBy: 1.0)
         case .custom:
@@ -603,9 +710,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func selectDotStyle(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let style = DotStyle(rawValue: raw) else { return }
-        if style == .custom {
-            openCustomColorPanel()
-        }
+        if style == .custom { openCustomColorPanel() }
         dotStyle = style
         refreshAppearanceMenu()
         updateDotColor()
@@ -615,11 +720,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard let raw = sender.representedObject as? String,
               let motion = DotMotion(rawValue: raw) else { return }
         var set = dotMotions
-        if set.contains(motion) {
-            set.remove(motion)
-        } else {
-            set.insert(motion)
-        }
+        if set.contains(motion) { set.remove(motion) } else { set.insert(motion) }
         dotMotions = set
         refreshAppearanceMenu()
         updateDotColor()
@@ -662,30 +763,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         stopRainbow()
-        // Green if expanded (not collapsed) OR mouse is hovering over menu bar
-        // Gray if collapsed and mouse is not in menu bar
-        let shouldBeGreen = !isCollapsed || mouseInMenuBar
-        targetDotAlpha = shouldBeGreen ? 1.0 : 0.0
+        let shouldBeActive = !isCollapsed || mouseInMenuBar
+        targetDotAlpha = shouldBeActive ? 1.0 : 0.0
 
-        // If no animation running, start one
         if colorAnimTimer == nil {
             colorAnimTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
                 guard let self = self else { timer.invalidate(); return }
-                let step: CGFloat = 0.04  // ~15 frames to transition = ~250ms
+                let step: CGFloat = 0.04
                 if self.currentDotAlpha < self.targetDotAlpha {
                     self.currentDotAlpha = min(self.currentDotAlpha + step, self.targetDotAlpha)
                 } else if self.currentDotAlpha > self.targetDotAlpha {
                     self.currentDotAlpha = max(self.currentDotAlpha - step, self.targetDotAlpha)
                 }
-
-                // Blend gray → green
-                let r = self.grayColor.redComponent + (self.greenColor.redComponent - self.grayColor.redComponent) * self.currentDotAlpha
-                let g = self.grayColor.greenComponent + (self.greenColor.greenComponent - self.grayColor.greenComponent) * self.currentDotAlpha
-                let b = self.grayColor.blueComponent + (self.greenColor.blueComponent - self.grayColor.blueComponent) * self.currentDotAlpha
+                let active = self.activeDotColor
+                let r = self.grayColor.redComponent   + (active.redComponent   - self.grayColor.redComponent)   * self.currentDotAlpha
+                let g = self.grayColor.greenComponent + (active.greenComponent - self.grayColor.greenComponent) * self.currentDotAlpha
+                let b = self.grayColor.blueComponent  + (active.blueComponent  - self.grayColor.blueComponent)  * self.currentDotAlpha
                 let blended = NSColor(red: r, green: g, blue: b, alpha: 1.0)
                 self.toggleItem.button?.image = self.makeDotImage(color: blended)
 
-                // Stop when we've arrived
                 if self.currentDotAlpha == self.targetDotAlpha {
                     timer.invalidate()
                     self.colorAnimTimer = nil
@@ -697,18 +793,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Mouse Tracking
 
     private func setupMouseTracking() {
-        // Use a timer to poll mouse location — works without Accessibility permissions
         mouseTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
             self?.pollMouseLocation()
         }
     }
 
     private func pollMouseLocation() {
-        let mouseLocation = NSEvent.mouseLocation  // screen coordinates (origin bottom-left)
+        let mouseLocation = NSEvent.mouseLocation
         guard let screen = NSScreen.main else { return }
-        // visibleFrame excludes the menu bar; the gap between frame.height and visibleFrame.maxY is the menu bar
-        // visibleFrame.maxY is the bottom edge of the menu bar
-        // Subtract a buffer so the entire menu bar area counts, not just the very top pixel
         let menuBarBottom = screen.visibleFrame.maxY - 25
         let inMenuBar = mouseLocation.y >= menuBarBottom
         if inMenuBar != mouseInMenuBar {
@@ -716,20 +808,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             updateDotColor()
         }
 
-        // Piggyback the watchdogs on this timer (0.15s ticks).
         pollTick += 1
-        if pollTick % 20 == 0 {   // every ~3s: dot dragged into the hidden zone?
-            checkLayoutOrder()
-        }
-        if pollTick % 34 == 0 {   // every ~5s: items still hosted by the menu bar?
-            checkHosting()
-        }
+        if pollTick % 20 == 0 { checkLayoutOrder() }
+        if pollTick % 34 == 0 { checkHosting() }
     }
 
-    /// Proactive version of the collapse guard: if the user drops the dot
-    /// inside the hidden zone, pop it back out within seconds instead of
-    /// waiting for a doomed click. Two consecutive checks with no mouse button
-    /// down, so we never fight an in-progress drag.
     private func checkLayoutOrder() {
         guard !isCollapsed, NSEvent.pressedMouseButtons == 0 else {
             misorderStreak = 0
@@ -749,52 +832,74 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - UI Setup
 
     private func setupUI() {
-        // Without an autosaveName the items persist under generic "Item-0"/"Item-1"
-        // keys. Tahoe's Control Center tracks visibility per key, and a crash can
-        // leave the generic keys marked hidden, vanishing the items on relaunch.
-        // Named keys sidestep that; forcing isVisible reasserts our own entry.
-        // Positions are distances from the screen's right edge. Seed them from the
-        // old bundle's layout (or sane defaults) so the separator sits left of the
-        // toggle with the always-visible zone between; without a seed, fresh items
-        // land at the far left of the status area with nothing left to hide.
         let defaults = UserDefaults.standard
+        // Seed toggle position
         if defaults.object(forKey: togglePositionKey) == nil {
             defaults.set(inheritedPosition(named: togglePositionKey, legacyKey: "NSStatusItem Preferred Position Item-0") ?? 230,
                          forKey: togglePositionKey)
         }
-        if defaults.object(forKey: separatorPositionKey) == nil {
-            defaults.set(inheritedPosition(named: separatorPositionKey, legacyKey: "NSStatusItem Preferred Position Item-1") ?? 388,
-                         forKey: separatorPositionKey)
+        // Seed separator positions (first launch only). Use wide spread so
+        // separators land in the app-icon zone, not crammed near the toggle.
+        // sep0 = leftmost (all icons), sep1 = middle split, sep2 = right split.
+        let sepKeys: [(String, Double, String?)] = [
+            (sep0PositionKey, 2000, "NSStatusItem Preferred Position mbb3-separator"),
+            (sep1PositionKey, 1200, nil),
+            (sep2PositionKey, 500,  nil),
+        ]
+        for (key, defaultVal, legacyKey) in sepKeys {
+            if defaults.object(forKey: key) == nil {
+                var inherited: Double? = nil
+                if let lk = legacyKey {
+                    inherited = inheritedPosition(named: lk, legacyKey: "NSStatusItem Preferred Position Item-1")
+                    // If the inherited position is too small (< 400) it was from the
+                    // old single-sep setup near the toggle — ignore it.
+                    if let v = inherited, v < 400 { inherited = nil }
+                }
+                defaults.set(inherited ?? defaultVal, forKey: key)
+            }
         }
+        defaults.synchronize()
         normalizeSavedPositions()
         bindStatusItems()
     }
 
-    /// Everything needed to (re)wire the two status items: autosave binding,
-    /// visibility, button config, expanded state. Shared between launch and
-    /// the hosting watchdog's item recreation.
     private func bindStatusItems() {
-        toggleItem.autosaveName = "mbb3-toggle"
-        separatorItem.autosaveName = "mbb3-separator"
+        let defaults = UserDefaults.standard
+        let sepNames = ["mbb3-sep-0", "mbb3-sep-1", "mbb3-sep-2"]
+
+        defaults.removeObject(forKey: "NSStatusItem VisibleCC mbb3-toggle")
+        for name in sepNames {
+            defaults.removeObject(forKey: "NSStatusItem VisibleCC \(name)")
+        }
+
         toggleItem.isVisible = true
-        separatorItem.isVisible = true
+        toggleItem.autosaveName = "mbb3-toggle"
 
-        configureToggleButton()      // green dot — rightmost, always visible
-        configureSeparatorButton()   // thin line — left of toggle
+        for (i, item) in separatorItems.enumerated() {
+            item.autosaveName = i < sepNames.count ? sepNames[i] : "mbb3-sep-\(i)"
+            item.isVisible = true
+        }
 
-        // Start expanded
-        safelySetLength(expandedLength, on: separatorItem)
+        configureToggleButton()
+        for (i, item) in separatorItems.enumerated() {
+            configureSeparatorItem(item, at: i)
+        }
+
+        safelySetLength(expandedLength, on: separatorItems[0])
+        updateSeparatorVisibility()
         updateDotColor()
     }
 
-    /// Last-resort recovery when the menu bar host stops hosting our items:
-    /// tear them down and register fresh ones in the original order.
     private func recreateStatusItems() {
         NSLog("MenuBarBuddy: recreating status items (hosting watchdog)")
         NSStatusBar.system.removeStatusItem(toggleItem)
-        NSStatusBar.system.removeStatusItem(separatorItem)
+        for item in separatorItems { NSStatusBar.system.removeStatusItem(item) }
+        separatorItems = []
+
         toggleItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        separatorItem = NSStatusBar.system.statusItem(withLength: 1)
+        for _ in 0..<groups.count {
+            separatorItems.insert(NSStatusBar.system.statusItem(withLength: 1), at: 0)
+        }
         bindStatusItems()
     }
 
@@ -808,23 +913,59 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
     }
 
-    private func configureSeparatorButton() {
-        guard let button = separatorItem.button else { return }
-        button.title = "│"
-        button.font = NSFont.systemFont(ofSize: 8, weight: .ultraLight)
-        let style = NSMutableParagraphStyle()
-        style.alignment = .center
-        button.attributedTitle = NSAttributedString(
-            string: "│",
-            attributes: [
-                .font: NSFont.systemFont(ofSize: 8, weight: .ultraLight),
-                .foregroundColor: NSColor(white: 1.0, alpha: 0.3),
-                .paragraphStyle: style
-            ]
-        )
+    private func configureSeparatorItem(_ item: NSStatusItem, at index: Int) {
+        guard let button = item.button else { return }
+        button.title = ""
+        button.imagePosition = .imageOnly
         button.target = self
         button.action = #selector(separatorClicked)
         button.sendAction(on: [.leftMouseUp])
+    }
+
+    // Separators sorted leftmost-to-rightmost by their actual screen x position.
+    // Falls back to ascending array-index order if windows aren't ready yet.
+    private func physicallyOrderedSeparators() -> [(index: Int, item: NSStatusItem)] {
+        let pairs = separatorItems.enumerated().map { (index: $0.offset, item: $0.element) }
+        guard pairs.allSatisfy({ $0.item.button?.window != nil }) else { return pairs }
+        return pairs.sorted { $0.item.button!.window!.frame.minX < $1.item.button!.window!.frame.minX }
+    }
+
+    // Rerender all visible separators according to currentStep
+    private func updateSeparatorVisibility() {
+        // Step 1: mark hidden / visible
+        var visible: [(index: Int, item: NSStatusItem)] = []
+        for (i, item) in separatorItems.enumerated() {
+            let hide = i < currentStep || (currentStep == 0 && (!showSeparatorLines || i == 0))
+            item.isVisible = !hide
+            if !hide { visible.append((index: i, item: item)) }
+        }
+        guard !visible.isEmpty else { return }
+
+        // Step 2: sort by physical left-to-right position so rendering matches the bar
+        if visible.allSatisfy({ $0.item.button?.window != nil }) {
+            visible.sort { $0.item.button!.window!.frame.minX < $1.item.button!.window!.frame.minX }
+        }
+
+        // Step 3: render
+        // Single | ONLY when collapsed and this is the physically-leftmost visible sep
+        // (marks the hidden-to-visible boundary). In expanded state all show ||.
+        for (rank, (i, item)) in visible.enumerated() {
+            if rank == 0 && currentStep > 0 {
+                // Leftmost visible while collapsed → boundary marker
+                item.button?.image = makeLeftSeparatorImage(color: groups[i].color)
+                item.length = 8
+            } else {
+                // Double || — sep i sits between group (i-1) and group i logically
+                let leftColorIdx = i > 0 ? i - 1 : 0
+                item.button?.image = makeDoubleSeparatorImage(
+                    leftColor: groups[leftColorIdx].color,
+                    rightColor: groups[i].color
+                )
+                item.length = 12
+            }
+            item.button?.imagePosition = .imageOnly
+            item.button?.title = ""
+        }
     }
 
     private func setupContextMenu() {
@@ -846,6 +987,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         loginItem.state = startAtLoginEnabled ? .on : .off
         contextMenu.addItem(loginItem)
         startAtLoginMenuItem = loginItem
+
+        let showLinesItem = NSMenuItem(title: "Show Lines", action: #selector(toggleShowLines), keyEquivalent: "")
+        showLinesItem.target = self
+        showLinesItem.state = showSeparatorLines ? .on : .off
+        contextMenu.addItem(showLinesItem)
+        showLinesMenuItem = showLinesItem
+
+        let systemItem = NSMenuItem(title: "System Items", action: nil, keyEquivalent: "")
+        let systemMenu = NSMenu()
+        let clockItem = NSMenuItem(title: "Hide Clock", action: #selector(toggleHideClock), keyEquivalent: "")
+        clockItem.target = self
+        clockItem.state = hideSystemClock ? .on : .off
+        systemMenu.addItem(clockItem)
+        hideClockMenuItem = clockItem
+        let ccItem = NSMenuItem(title: "Hide Control Center", action: #selector(toggleHideCC), keyEquivalent: "")
+        ccItem.target = self
+        ccItem.state = hideControlCenter ? .on : .off
+        systemMenu.addItem(ccItem)
+        hideCCMenuItem = ccItem
+        systemItem.submenu = systemMenu
+        contextMenu.addItem(systemItem)
 
         let appearanceItem = NSMenuItem(title: "Appearance", action: nil, keyEquivalent: "")
         let submenu = NSMenu()
@@ -889,7 +1051,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         contextMenu.addItem(quitItem)
     }
 
-    /// Sync the checkmarks in the Appearance submenu to the persisted settings.
     private func refreshAppearanceMenu() {
         guard let submenu = appearanceMenu else { return }
         for item in submenu.items {
@@ -906,7 +1067,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateContextMenuTitle() {
-        let title = isCollapsed ? "Expand Menu Bar" : "Collapse Menu Bar"
+        let title: String
+        if currentStep == 0 {
+            title = "Hide Menu Bar"
+        } else if currentStep < groups.count {
+            title = "Hide More"
+        } else {
+            title = "Expand Menu Bar"
+        }
         if contextMenu.items.isEmpty {
             let item = NSMenuItem(title: title, action: #selector(toggleMenuBarAction), keyEquivalent: "")
             item.target = self
@@ -917,11 +1085,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func toggleItemClicked(_ sender: Any?) {
-        guard let event = NSApp.currentEvent else { return }
-
-        if event.type == .rightMouseUp {
+        let isRightClick = NSApp.currentEvent?.type == .rightMouseUp
+        if isRightClick {
             updateContextMenuTitle()
             startAtLoginMenuItem?.state = startAtLoginEnabled ? .on : .off
+            showLinesMenuItem?.state = showSeparatorLines ? .on : .off
+            hideClockMenuItem?.state = hideSystemClock ? .on : .off
+            hideCCMenuItem?.state = hideControlCenter ? .on : .off
             refreshAppearanceMenu()
             toggleItem.menu = contextMenu
             toggleItem.button?.performClick(nil)
@@ -931,29 +1101,56 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc private func toggleMenuBarAction() {
-        toggleMenuBar()
-    }
+    @objc private func toggleMenuBarAction() { toggleMenuBar() }
 
     @objc private func separatorClicked() {
-        if isCollapsed {
-            expandMenuBar()
-        }
+        if isCollapsed { expandMenuBar() }
     }
+
+    // MARK: - Collapse cycle
 
     private func toggleMenuBar() {
-        if isCollapsed {
+        let now = Date()
+
+        // Double-click within 0.4s: collapse all or expand all
+        if now.timeIntervalSince(lastClickTime) < 0.4 {
+            lastClickTime = .distantPast
+            if currentStep > 0 {
+                expandMenuBar()
+            } else {
+                collapseMenuBar(step: groups.count)
+            }
+            return
+        }
+        lastClickTime = now
+
+        let timeSinceLast = now.timeIntervalSince(lastPressTime)
+        lastPressTime = now
+
+        // Time-based reset: if bar is partially/fully collapsed and idle > 60s,
+        // the next press expands rather than advancing
+        if currentStep > 0 && timeSinceLast > cycleTimeoutSeconds {
             expandMenuBar()
+            return
+        }
+
+        let major = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+
+        if currentStep < groups.count {
+            let nextStep = currentStep + 1
+            if major >= 26 {
+                collapseViaAssessmentMode(step: nextStep)
+            } else {
+                currentStep = nextStep
+                collapseViaLengthPush()
+            }
         } else {
-            collapseMenuBar()
+            expandMenuBar()
         }
     }
 
-    // MARK: - Layout guard (the toggle must never sit inside the hidden zone)
+    // MARK: - Layout guard
 
-    /// Look up a saved menu bar position in previous bundle IDs' domains so an
-    /// ID bump keeps the user's arrangement. Recent domains use the same named
-    /// key; the oldest used the auto-generated Item-N keys.
     private func inheritedPosition(named key: String, legacyKey: String) -> Double? {
         for domain in SettingsStore.previousBundleIDs {
             let lookup = domain == "com.menubarbuddy.app" ? legacyKey : key
@@ -964,47 +1161,58 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return nil
     }
 
-    /// Repair corrupt or unsafe saved positions before the items restore:
-    /// non-finite/absurd values reset to seeds, and if the toggle would land
-    /// at or left of the separator it is forced back to the far right.
     private func normalizeSavedPositions() {
         let defaults = UserDefaults.standard
         var togglePos = defaults.double(forKey: togglePositionKey)
-        var separatorPos = defaults.double(forKey: separatorPositionKey)
-        let isSane: (Double) -> Bool = { $0.isFinite && $0 >= 0 && $0 <= 5000 }
-        if !isSane(togglePos) {
-            togglePos = 230
-            defaults.set(togglePos, forKey: togglePositionKey)
+        var sep2Pos   = defaults.double(forKey: sep2PositionKey)
+        var sep1Pos   = defaults.double(forKey: sep1PositionKey)
+        var sep0Pos   = defaults.double(forKey: sep0PositionKey)
+
+        let isSane: (Double) -> Bool = { $0.isFinite && $0 >= 0 && $0 <= 10000 }
+        if !isSane(togglePos) { togglePos = 230;  defaults.set(togglePos, forKey: togglePositionKey) }
+        if !isSane(sep2Pos)   { sep2Pos   = 500;  defaults.set(sep2Pos,   forKey: sep2PositionKey) }
+        if !isSane(sep1Pos)   { sep1Pos   = 1200; defaults.set(sep1Pos,   forKey: sep1PositionKey) }
+        if !isSane(sep0Pos)   { sep0Pos   = 2000; defaults.set(sep0Pos,   forKey: sep0PositionKey) }
+
+        // If all three separators are clustered close together (< 800 apart in total),
+        // they were likely seeded from the old close-to-toggle defaults (350/500/650).
+        // Force-reset to a wide spread so they land in the actual icon zone.
+        if sep0Pos - sep2Pos < 800 && sep0Pos < 2500 {
+            sep0Pos = 2000; sep1Pos = 1200; sep2Pos = 500
+            defaults.set(sep0Pos, forKey: sep0PositionKey)
+            defaults.set(sep1Pos, forKey: sep1PositionKey)
+            defaults.set(sep2Pos, forKey: sep2PositionKey)
         }
-        if !isSane(separatorPos) {
-            separatorPos = 388
-            defaults.set(separatorPos, forKey: separatorPositionKey)
-        }
-        if togglePos >= separatorPos {
+
+        // Ensure toggle < sep2 < sep1 < sep0 (larger = further left)
+        if togglePos >= sep2Pos {
             defaults.set(20, forKey: togglePositionKey)
-            defaults.set(max(separatorPos, 80), forKey: separatorPositionKey)
         }
+        if sep2Pos >= sep1Pos {
+            sep1Pos = sep2Pos + 500
+            defaults.set(sep1Pos, forKey: sep1PositionKey)
+        }
+        if sep1Pos >= sep0Pos {
+            sep0Pos = sep1Pos + 600
+            defaults.set(sep0Pos, forKey: sep0PositionKey)
+        }
+        defaults.synchronize()
     }
 
-    /// Distance from the right edge of the item's own screen, like the
-    /// "NSStatusItem Preferred Position" defaults. Nil if the item has no window.
     private func liveDistanceFromRightEdge(_ item: NSStatusItem) -> CGFloat? {
         guard let window = item.button?.window, let screen = window.screen else { return nil }
         return screen.frame.maxX - window.frame.maxX
     }
 
-    /// True when the toggle currently sits to the right of the separator.
     private var layoutIsSafeToCollapse: Bool {
-        guard let togglePos = liveDistanceFromRightEdge(toggleItem),
-              let separatorPos = liveDistanceFromRightEdge(separatorItem) else { return true }
-        return togglePos < separatorPos
+        guard let togglePos = liveDistanceFromRightEdge(toggleItem) else { return true }
+        for sep in separatorItems {
+            guard let sepPos = liveDistanceFromRightEdge(sep) else { continue }
+            if togglePos >= sepPos { return false }
+        }
+        return true
     }
 
-    /// The user dragged the dot into the hidden zone, where collapsing would
-    /// hide the toggle itself. Fix the saved position and re-insert the dot so
-    /// it jumps back to the safe side. No relaunch: killing the process while
-    /// the menu bar host is mid-manipulation is what gets the bundle ID
-    /// blacklisted (see HANDOFF.md).
     private func healLayout() {
         UserDefaults.standard.set(20, forKey: togglePositionKey)
         toggleItem.isVisible = false
@@ -1015,10 +1223,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Sets an NSStatusItem length behind the ObjC exception shield. macOS 26
-    /// throws NSInvalidArgumentException above a system cap (10,000 today);
-    /// if Apple ever lowers it, fall back through smaller values instead of
-    /// dying mid-click with the UI half-toggled.
     @discardableResult
     private func safelySetLength(_ target: CGFloat, on item: NSStatusItem) -> Bool {
         for candidate in ([target, 5000, 2500, 1200].filter { $0 <= target }) {
@@ -1030,76 +1234,311 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
-    private func collapseMenuBar() {
+    // MARK: - Cover panel (pre-macOS 26 fallback overlay)
+
+    private func menuBarBackgroundColor() -> NSColor {
+        let sampleX: CGFloat = 400
+        let sampleY: CGFloat = 10
+        guard let img = CGDisplayCreateImage(CGMainDisplayID(),
+                                             rect: CGRect(x: sampleX, y: sampleY, width: 2, height: 2)),
+              let data = img.dataProvider?.data,
+              let ptr = CFDataGetBytePtr(data) else {
+            return NSColor(white: 0.12, alpha: 1.0)
+        }
+        let r = CGFloat(ptr[0]) / 255
+        let g = CGFloat(ptr[1]) / 255
+        let b = CGFloat(ptr[2]) / 255
+        return NSColor(red: r, green: g, blue: b, alpha: 1.0)
+    }
+
+    private func frontAppMenuBarRightEdge() -> CGFloat {
+        if AXIsProcessTrusted(), let edge = axFrontAppMenuBarRightEdge(), edge > 100 {
+            return edge
+        }
+        return 700
+    }
+
+    private func axFrontAppMenuBarRightEdge() -> CGFloat? {
+        let system = AXUIElementCreateSystemWide()
+        var appRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(system, kAXFocusedApplicationAttribute as CFString, &appRef) == .success,
+              let appEl = appRef else { return nil }
+        var mbRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appEl as! AXUIElement, kAXMenuBarAttribute as CFString, &mbRef) == .success,
+              let mbEl = mbRef else { return nil }
+        var childRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(mbEl as! AXUIElement, kAXChildrenAttribute as CFString, &childRef) == .success,
+              let items = childRef as? [AXUIElement] else { return nil }
+        var maxX: CGFloat = 0
+        for item in items {
+            var posRef: CFTypeRef?
+            var szRef: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(item, kAXPositionAttribute as CFString, &posRef) == .success,
+                  AXUIElementCopyAttributeValue(item, kAXSizeAttribute as CFString, &szRef) == .success,
+                  let posRaw = posRef, let szRaw = szRef else { continue }
+            let pv = posRaw as! AXValue
+            let sv = szRaw as! AXValue
+            var pos = CGPoint.zero
+            var sz = CGSize.zero
+            AXValueGetValue(pv, .cgPoint, &pos)
+            AXValueGetValue(sv, .cgSize, &sz)
+            maxX = max(maxX, pos.x + sz.width)
+        }
+        return maxX > 100 ? maxX : nil
+    }
+
+    private func captureMenuBarBackground(x: CGFloat, width: CGFloat, menuBarHeight: CGFloat) -> NSImage? {
+        let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+        let sampleH: CGFloat = 80
+        let rect = CGRect(
+            x: x * scale,
+            y: menuBarHeight * scale,
+            width: max(width * scale, 1),
+            height: sampleH * scale
+        )
+        guard let cgImage = CGDisplayCreateImage(CGMainDisplayID(), rect: rect) else { return nil }
+        let ciImage = CIImage(cgImage: cgImage)
+        guard let blurFilter = CIFilter(name: "CIGaussianBlur") else { return nil }
+        blurFilter.setValue(ciImage, forKey: kCIInputImageKey)
+        blurFilter.setValue(20.0, forKey: kCIInputRadiusKey)
+        guard let blurred = blurFilter.outputImage else { return nil }
+        let cropped = blurred.cropped(to: ciImage.extent)
+        let ciCtx = CIContext(options: nil)
+        guard let cgBlurred = ciCtx.createCGImage(cropped, from: ciImage.extent) else { return nil }
+        return NSImage(cgImage: cgBlurred, size: NSSize(width: max(width, 1), height: menuBarHeight))
+    }
+
+    private func showCoverPanel() {
+        guard let toggleWindow = toggleItem.button?.window else { return }
+        let leftEdge = frontAppMenuBarRightEdge() + 10
+        let rightEdge = toggleWindow.frame.minX
+        guard rightEdge > leftEdge + 20 else { return }
+
+        let frame = CGRect(
+            x: leftEdge,
+            y: toggleWindow.frame.origin.y,
+            width: rightEdge - leftEdge,
+            height: toggleWindow.frame.height
+        )
+
+        if coverPanel == nil {
+            let panel = NSPanel(
+                contentRect: frame,
+                styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered,
+                defer: false
+            )
+            panel.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
+            panel.collectionBehavior = [.canJoinAllSpaces, .stationary]
+            panel.ignoresMouseEvents = true
+            panel.hasShadow = false
+            panel.isOpaque = true
+            let iv = NSImageView(frame: NSRect(origin: .zero, size: frame.size))
+            iv.autoresizingMask = [.width, .height]
+            iv.imageScaling = .scaleAxesIndependently
+            panel.contentView = iv
+            coverPanel = panel
+        }
+
+        let bg = captureMenuBarBackground(x: leftEdge, width: frame.width, menuBarHeight: frame.height)
+        (coverPanel?.contentView as? NSImageView)?.image = bg
+        coverPanel?.setFrame(frame, display: false)
+        coverPanel?.orderFrontRegardless()
+    }
+
+    private func hideCoverPanel() { coverPanel?.orderOut(nil) }
+
+    // MARK: - Collapse / expand
+
+    private func collapseMenuBar(step: Int = 1) {
         guard layoutIsSafeToCollapse else {
             healLayout()
             return
         }
-        // Tahoe clamps the drawn extent of status items that still have
-        // content, which breaks the width-push. The expanded separator must be
-        // a pure spacer: no title, no image, cell disabled (Ice does the same).
-        if let button = separatorItem.button {
+        let major = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+        if major >= 26 {
+            collapseViaAssessmentMode(step: step)
+        } else {
+            currentStep = step
+            collapseViaLengthPush()
+        }
+        updateDotColor()
+    }
+
+    private func collapseViaAssessmentMode(step: Int) {
+        let prevStep = currentStep
+        currentStep = step
+        updateSeparatorVisibility()
+        updateDotColor()
+        updateContextMenuTitle()
+
+        let ownID = Bundle.main.bundleIdentifier ?? "com.menubarbuddy.app"
+        var allowed: [String] = [ownID]
+
+        // Use PHYSICAL order: at step k the kth separator from the left is the boundary.
+        // Everything to its right stays visible; everything to its left gets hidden.
+        if step < separatorItems.count {
+            let ordered = physicallyOrderedSeparators()
+            allowed += appsRightOfSeparatorItem(ordered[step].item)
+        }
+        // step >= count → nuclear: only ownID allowed
+
+        barHider.activate(withAllowedBundleIDs: allowed, allowedSystemItems: buildSysItemsArray()) { [self] success, _ in
+            if !success {
+                currentStep = prevStep
+                updateSeparatorVisibility()
+                updateDotColor()
+                updateContextMenuTitle()
+                collapseViaLengthPush()
+            }
+        }
+    }
+
+    private func mbbLog(_ msg: String) {
+        let line = msg + "\n"
+        if let data = line.data(using: .utf8) {
+            let url = URL(fileURLWithPath: "/tmp/mbb-debug.log")
+            if let fh = try? FileHandle(forWritingTo: url) {
+                fh.seekToEndOfFile(); fh.write(data); try? fh.close()
+            } else {
+                try? data.write(to: url, options: .atomic)
+            }
+        }
+    }
+
+    // Bundle IDs of apps whose menu bar extra sits to the RIGHT of the given separator.
+    // Uses the Accessibility API (kAXExtrasMenuBarAttribute) which works on macOS 26
+    // without Screen Recording. Falls back to allowing all apps if AX isn't trusted yet.
+    private func appsRightOfSeparatorItem(_ sep: NSStatusItem) -> [String] {
+        guard let sepWindow = sep.button?.window else {
+            mbbLog("MBB appsRight: sep has no window")
+            return []
+        }
+        // AppKit x coordinate (from left edge, logical points)
+        let sepX = sepWindow.frame.minX
+        mbbLog("MBB appsRight: sep.frame=\(NSStringFromRect(sepWindow.frame)) sepX=\(sepX)")
+
+        // If Accessibility isn't trusted, request it and fall back to all-apps (no-op)
+        guard AXIsProcessTrusted() else {
+            mbbLog("MBB appsRight: AX not trusted — requesting permission")
+            let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+            AXIsProcessTrustedWithOptions(opts)
+            // Fall through: return all running apps so Assessment Mode doesn't hide anything
+            return allMenuBarBundleIDs()
+        }
+
+        let ownID = Bundle.main.bundleIdentifier ?? ""
+        var result: [String] = []
+        var seen = Set<String>()
+
+        for app in NSWorkspace.shared.runningApplications {
+            guard let bid = app.bundleIdentifier, bid != ownID, !seen.contains(bid) else { continue }
+            // Only check apps that could have menu bar extras
+            guard app.activationPolicy == .accessory || app.activationPolicy == .regular else { continue }
+
+            let axApp = AXUIElementCreateApplication(app.processIdentifier)
+            var extrasValue: CFTypeRef?
+            let err = AXUIElementCopyAttributeValue(axApp, "AXExtrasMenuBar" as CFString, &extrasValue)
+            guard err == .success, let extrasEl = extrasValue else { continue }
+
+            // Get children (the actual status bar items for this app)
+            var childrenValue: CFTypeRef?
+            AXUIElementCopyAttributeValue(extrasEl as! AXUIElement, kAXChildrenAttribute as CFString, &childrenValue)
+            let children = (childrenValue as? [AXUIElement]) ?? []
+
+            // Find the leftmost item this app owns
+            var appMinX: CGFloat = CGFloat.greatestFiniteMagnitude
+            let items = children.isEmpty ? [extrasEl as! AXUIElement] : children
+            for item in items {
+                var posValue: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(item as AXUIElement, kAXPositionAttribute as CFString, &posValue) == .success,
+                      let pv = posValue else { continue }
+                var pt = CGPoint.zero
+                // AX uses CG coordinates (top-left origin); X is the same as AppKit X
+                AXValueGetValue(pv as! AXValue, AXValueType.cgPoint, &pt)
+                if pt.x < appMinX { appMinX = pt.x }
+            }
+            if appMinX == CGFloat.greatestFiniteMagnitude { continue }
+
+            mbbLog("MBB appsRight: bid=\(bid) appMinX=\(appMinX) vs sepX=\(sepX) → \(appMinX >= sepX ? "ALLOW" : "skip")")
+            if appMinX >= sepX { seen.insert(bid); result.append(bid) }
+        }
+
+        mbbLog("MBB appsRight: returning \(result.count) apps: \(result.joined(separator: ","))")
+        return result
+    }
+
+    // All bundle IDs for running apps that could have menu bar extras
+    private func allMenuBarBundleIDs() -> [String] {
+        let ownID = Bundle.main.bundleIdentifier ?? ""
+        return NSWorkspace.shared.runningApplications.compactMap { app in
+            guard let bid = app.bundleIdentifier, bid != ownID else { return nil }
+            guard app.activationPolicy == .accessory || app.activationPolicy == .regular else { return nil }
+            return bid
+        }
+    }
+
+    private func collapseViaLengthPush() {
+        guard let sep = separatorItems.first else { return }
+        if let button = sep.button {
             button.attributedTitle = NSAttributedString(string: "")
             button.title = ""
             button.image = nil
             button.cell?.isEnabled = false
             button.isHighlighted = false
         }
-        guard safelySetLength(collapseLength, on: separatorItem) else {
-            // Could not grow at any size; restore the expanded look so the UI
-            // never shows a cleared separator that did nothing.
-            expandMenuBar()
-            return
-        }
-        updateDotColor()
-        // Verify the push took: Tahoe has silently ignored large lengths
-        // before. If the separator window never grew, undo cleanly.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [self] in
-            if isCollapsed, let window = separatorItem.button?.window, window.frame.width < 100 {
-                NSLog("MenuBarBuddy: collapse did not take effect; reverting")
-                expandMenuBar()
+        showCoverPanel()
+        let startLen: CGFloat = expandedLength
+        let endLen = collapseLength
+        let totalSteps = 8
+        var animStep = 0
+        collapseStepTimer?.invalidate()
+        collapseStepTimer = Timer.scheduledTimer(withTimeInterval: 0.06, repeats: true) { [self] _ in
+            animStep += 1
+            let t = CGFloat(animStep) / CGFloat(totalSteps)
+            let len = startLen + (endLen - startLen) * t
+            safelySetLength(len, on: sep)
+            if animStep >= totalSteps {
+                collapseStepTimer?.invalidate()
+                collapseStepTimer = nil
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [self] in
+                    if isCollapsed, let window = sep.button?.window, window.frame.width < 100 {
+                        NSLog("MenuBarBuddy: collapse did not take effect; reverting")
+                        expandMenuBar()
+                    }
+                }
             }
         }
     }
 
     private func expandMenuBar() {
-        separatorItem.button?.cell?.isEnabled = true
-        safelySetLength(expandedLength, on: separatorItem)
-        let style = NSMutableParagraphStyle()
-        style.alignment = .center
-        separatorItem.button?.attributedTitle = NSAttributedString(
-            string: "│",
-            attributes: [
-                .font: NSFont.systemFont(ofSize: 8, weight: .ultraLight),
-                .foregroundColor: NSColor(white: 1.0, alpha: 0.3),
-                .paragraphStyle: style
-            ]
-        )
+        collapseStepTimer?.invalidate()
+        collapseStepTimer = nil
+        if currentStep > 0 {
+            barHider.deactivate()
+            currentStep = 0
+        } else {
+            hideCoverPanel()
+        }
+        // Restore leftmost separator's length (used for length-push fallback)
+        if let sep = separatorItems.first {
+            safelySetLength(expandedLength, on: sep)
+            sep.button?.cell?.isEnabled = true
+        }
+        updateSeparatorVisibility()
         updateDotColor()
+        updateContextMenuTitle()
     }
 
     // MARK: - Hosting watchdog + self-repair
 
-    /// True when the window is parked outside every online display. A plain
-    /// `y < 0` test is wrong on multi-display setups: a monitor arranged below
-    /// or left of the main screen legitimately puts its menu bar windows at
-    /// negative global coordinates (that false positive is what fired the
-    /// repair alert daily on a 3-display arrangement).
     private func windowIsParkedOffscreen(_ window: NSWindow) -> Bool {
         let frame = window.frame
         if window.screen != nil { return false }
         return !NSScreen.screens.contains { $0.frame.intersects(frame) }
     }
 
-    /// Signature of the macOS 26 orphaning: the app runs, isVisible is true,
-    /// but the items' windows are parked outside every display or crammed on
-    /// top of each other at a display edge instead of being laid out in the
-    /// menu bar.
     private func itemsLookOrphaned() -> Bool {
-        // The toggle dot must be sanely hosted in EVERY state (only the
-        // separator's geometry is intentionally weird while collapsed). This
-        // must not skip collapsed state: an orphaned separator still accepts a
-        // 10,000 length, so a blind-while-collapsed watchdog never fires.
         guard let toggleWindow = toggleItem.button?.window else {
             NSLog("MenuBarBuddy: watchdog: toggle has no window")
             return true
@@ -1109,26 +1548,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return true
         }
         guard !isCollapsed else { return false }
-        guard let separatorWindow = separatorItem.button?.window else {
-            NSLog("MenuBarBuddy: watchdog: separator has no window")
-            return true
-        }
-        if windowIsParkedOffscreen(separatorWindow) {
-            NSLog("MenuBarBuddy: watchdog: separator parked at \(separatorWindow.frame)")
-            return true
-        }
-        if toggleWindow.frame.intersects(separatorWindow.frame) {
-            NSLog("MenuBarBuddy: watchdog: items overlap (toggle \(toggleWindow.frame), separator \(separatorWindow.frame))")
-            return true
+        for (i, item) in separatorItems.enumerated() {
+            guard item.isVisible, let sepWindow = item.button?.window else {
+                if item.isVisible {
+                    NSLog("MenuBarBuddy: watchdog: separator \(i) has no window")
+                    return true
+                }
+                continue
+            }
+            if windowIsParkedOffscreen(sepWindow) {
+                NSLog("MenuBarBuddy: watchdog: separator \(i) parked at \(sepWindow.frame)")
+                return true
+            }
+            if toggleWindow.frame.intersects(sepWindow.frame) {
+                NSLog("MenuBarBuddy: watchdog: items overlap (toggle \(toggleWindow.frame), sep \(i) \(sepWindow.frame))")
+                return true
+            }
         }
         return false
     }
 
-    /// Escalating recovery: three consecutive positives (~15s) to rule out
-    /// transient states, then recreate the items in-process (twice max), then
-    /// offer the bundle-ID self-repair once. Stands down entirely while the
-    /// screens are asleep, the session is locked, a display reconfiguration
-    /// just happened, or a mouse button is down (mid-drag geometry lies).
     private func checkHosting() {
         guard !screensAsleep, !sessionLocked, Date() >= watchdogGraceUntil,
               NSEvent.pressedMouseButtons == 0 else {
@@ -1142,8 +1581,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         parkedStreak += 1
         guard parkedStreak >= 3 else { return }
         parkedStreak = 0
-        // Isolated incidents days apart shouldn't accumulate into the alert:
-        // a real blacklisting re-orphans within seconds of a recreation.
         if Date().timeIntervalSince(lastHostingRecoveryAt) > 24 * 3600 {
             hostingRecoveryAttempts = 0
         }
@@ -1158,9 +1595,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showRepairAlert() {
-        // The modal alert freezes every timer in the app until dismissed, so a
-        // relaunch (login items start daily) must not re-raise it on a stale
-        // grudge: at most one alert per 20h, persisted across restarts.
         let lastAlertKey = "MenuBarBuddy.lastRepairAlertAt"
         let last = UserDefaults.standard.double(forKey: lastAlertKey)
         if last > 0, Date().timeIntervalSince1970 - last < 20 * 3600 {
@@ -1172,7 +1606,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = "MenuBarBuddy's icons are being blocked"
-        alert.informativeText = "macOS blocked this copy of the app after an unclean shutdown (this happens if the app is force-killed while the menu bar is busy). Repair re-registers the app under a fresh identity and relaunches it. Your settings and icon positions are kept."
+        alert.informativeText = "macOS blocked this copy of the app after an unclean shutdown. Repair re-registers the app under a fresh identity and relaunches it. Your settings and icon positions are kept."
         alert.addButton(withTitle: "Repair and Relaunch")
         alert.addButton(withTitle: "Later")
         let response = alert.runModal()
@@ -1182,10 +1616,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// The blacklist is keyed on the bundle ID and survives relaunches and
-    /// Control Center restarts; the only known escape is a fresh ID. Bump our
-    /// own CFBundleIdentifier (v4 -> v5 -> ...), re-sign, and relaunch. The
-    /// settings/position migration picks the old domain up automatically.
     private func performSelfRepair() {
         guard let bundleID = Bundle.main.bundleIdentifier else { return }
         let bundlePath = Bundle.main.bundlePath
@@ -1201,8 +1631,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             NSLog("MenuBarBuddy: self-repair failed to write Info.plist")
             return
         }
-        // Re-sign and relaunch after this process has fully exited (a running
-        // binary cannot be re-signed in place).
         let script = "sleep 1; /usr/bin/codesign --force -s - \"\(bundlePath)\"; sleep 1; /usr/bin/open \"\(bundlePath)\""
         let relauncher = Process()
         relauncher.launchPath = "/bin/sh"
@@ -1225,11 +1653,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             onEmojiChange: { [weak self] emoji in
                 self?.toggleItem.button?.title = emoji
             },
-            onStartEmojiChange: { [weak self] emoji in
-                guard let self = self else { return }
-                if !self.isCollapsed {
-                    self.separatorItem.button?.title = emoji
-                }
+            onStartEmojiChange: { _ in
+                // Separators now use colored line images, not emoji
             },
             onPushMultiplierChange: { [weak self] in
                 self?.updateCollapseLength()
@@ -1252,7 +1677,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
-
         self.settingsWindow = window
 
         NotificationCenter.default.addObserver(
@@ -1266,20 +1690,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func quitApp() {
-        if isCollapsed {
-            expandMenuBar()
-        }
+        if isCollapsed { expandMenuBar() }
         mouseTimer?.invalidate()
         NSApp.terminate(nil)
     }
 
-    /// Every termination path must expand first — dying while collapsed is
-    /// what gets the bundle ID blacklisted. quitApp() and the signal handlers
-    /// already do; this catches the rest (AppleScript quit, logout).
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if isCollapsed {
-            expandMenuBar()
-        }
+        if isCollapsed { expandMenuBar() }
         return .terminateNow
     }
 }

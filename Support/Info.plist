@@ -22,5 +22,7 @@
 	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>MenuBarBuddy needs Screen Recording access to detect which menu bar items are in each group, so it can selectively hide groups when you collapse the bar.</string>
 </dict>
 </plist>
