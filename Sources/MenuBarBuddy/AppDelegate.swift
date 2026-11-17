@@ -391,15 +391,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return loaded.isEmpty ? CollapseGroup.defaults : loaded
     }
 
-    private func buildSysItemsArray() -> [NSNumber] {
-        var items: [NSNumber] = []
-        for i in 1...8 {
-            if i == 1 && hideSystemClock { continue }   // 1 = Date/Time clock
-            if i == 6 && hideControlCenter { continue } // 6 = Control Center (best guess)
-            items.append(NSNumber(value: i))
-        }
-        return items
-    }
+    // Clock = com.apple.MenuBarAgent, CC = com.apple.controlcenter.
+    // We hide them by omitting their bundle IDs from allowedBundleIdentifiers;
+    // allowedSystemItems is always unrestricted (empty = all system items shown).
+    private static let clockBundleID = "com.apple.MenuBarAgent"
+    private static let ccBundleID    = "com.apple.controlcenter"
 
     // MARK: - Debug test harness (--test-collapse)
 
@@ -1383,7 +1379,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // step >= count → nuclear: only ownID allowed
 
-        barHider.activate(withAllowedBundleIDs: allowed, allowedSystemItems: buildSysItemsArray()) { [self] success, _ in
+        // Clock and CC are hidden by omitting their bundle IDs (allowedSystemItems stays empty = unrestricted).
+        if hideSystemClock  { allowed.removeAll { $0 == AppDelegate.clockBundleID } }
+        if hideControlCenter { allowed.removeAll { $0 == AppDelegate.ccBundleID } }
+
+        barHider.activate(withAllowedBundleIDs: allowed, allowedSystemItems: []) { [self] success, _ in
             if !success {
                 currentStep = prevStep
                 updateSeparatorVisibility()

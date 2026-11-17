@@ -22,6 +22,8 @@
 	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSAccessibilityUsageDescription</key>
+	<string>MenuBarBuddy needs Accessibility access to detect which menu bar items belong to each group, so it can selectively hide groups when you collapse the bar.</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>MenuBarBuddy needs Screen Recording access to detect which menu bar items are in each group, so it can selectively hide groups when you collapse the bar.</string>
 </dict>
