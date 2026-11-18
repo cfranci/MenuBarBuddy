@@ -34,7 +34,9 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp Support/Info.plist "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $KEEP_ID" "$APP/Contents/Info.plist"
 cp .build/release/MenuBarBuddy "$APP/Contents/MacOS/MenuBarBuddy"
-codesign --force -s - "$APP"
+# Sign with the stable Apple Development identity so TCC recognizes the app
+# across rebuilds (ad-hoc -s - creates a new hash every build → TCC re-asks).
+codesign --force -s "AA8088A111B17208AB871485A20FD1E579C4F6D4" "$APP"
 
 echo "Installed as $KEEP_ID. Relaunching..."
 open "$APP"
