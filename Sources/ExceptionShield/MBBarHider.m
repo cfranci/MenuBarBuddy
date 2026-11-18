@@ -46,17 +46,16 @@ static void mbbhLog(NSString *msg) {
 
     // Build config: empty sysItems → initWithUnrestrictedMenuBarItems (allow ALL system items).
     // Non-empty sysItems → initWithAllowedSystemItems:allowedBundleIdentifiers: (allow only listed).
-    id config;
-    if (sysItems.count == 0) {
-        config = [[configClass alloc] performSelector:@selector(initWithUnrestrictedMenuBarItems)];
-        mbbhLog(@"MBBarHider: using initWithUnrestrictedMenuBarItems (all system items allowed)");
-    } else {
-        config = [[configClass alloc]
-            performSelector:@selector(initWithAllowedSystemItems:allowedBundleIdentifiers:)
-                 withObject:sysItems
-                 withObject:allowedIDs];
-        mbbhLog([NSString stringWithFormat:@"MBBarHider: restricted sysItems=%@ bundleIDs=%@", sysItems, allowedIDs]);
-    }
+    // The Unrestricted init ignores allowedBundleIdentifiers entirely, so it never hides
+    // third-party icons. Always use the restricted init; empty sysItems means "all 0-8".
+    // sysItems is explicit: empty array = hide ALL system items (Wi-Fi, battery, clock, CC).
+    // Mapping on macOS 27: 0 battery, 1 mic/privacy dot, 2 clock, 6 Wi-Fi, 7 Stage Manager pill, 8 Control Center.
+    NSArray<NSNumber *> *items = sysItems;
+    id config = [[configClass alloc]
+        performSelector:@selector(initWithAllowedSystemItems:allowedBundleIdentifiers:)
+             withObject:items
+             withObject:allowedIDs];
+    mbbhLog([NSString stringWithFormat:@"MBBarHider: restricted sysItems=%@ bundleIDs=%@", items, allowedIDs]);
 
     // Invalidate any previous assertion before creating a new one.
     if (_assertion) {

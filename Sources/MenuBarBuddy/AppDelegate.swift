@@ -1368,28 +1368,36 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         updateDotColor()
         updateContextMenuTitle()
 
-        let ownID = Bundle.main.bundleIdentifier ?? "com.menubarbuddy.app"
-        var allowed: [String] = [ownID]
+        // Wait for the menu bar to re-lay out after separators change, otherwise AX positions are stale.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [self] in
+            guard currentStep == step else { return }
+            let ownID = Bundle.main.bundleIdentifier ?? "com.menubarbuddy.app"
+            var allowed: [String] = [ownID]
 
-        // Use PHYSICAL order: at step k the kth separator from the left is the boundary.
-        // Everything to its right stays visible; everything to its left gets hidden.
-        if step < separatorItems.count {
-            let ordered = physicallyOrderedSeparators()
-            allowed += appsRightOfSeparatorItem(ordered[step].item)
-        }
-        // step >= count → nuclear: only ownID allowed
+            // Boundary = physically leftmost VISIBLE separator. Everything left of it is hidden.
+            var sysItems: [NSNumber] = []
+            if step < separatorItems.count {
+                let boundary = separatorItems
+                    .filter { $0.isVisible && $0.button?.window != nil }
+                    .min { $0.button!.window!.frame.minX < $1.button!.window!.frame.minX }
+                if let boundary { allowed += appsRightOfSeparatorItem(boundary) }
+                sysItems = [0, 1, 3, 4, 5, 6, 7]
+                if !hideSystemClock { sysItems.append(2) }
+                if !hideControlCenter { sysItems.append(8) }
+            }
+            // step >= count → nuclear: only ownID allowed, no system items
 
-        // Clock and CC are hidden by omitting their bundle IDs (allowedSystemItems stays empty = unrestricted).
-        if hideSystemClock  { allowed.removeAll { $0 == AppDelegate.clockBundleID } }
-        if hideControlCenter { allowed.removeAll { $0 == AppDelegate.ccBundleID } }
+            if hideSystemClock  { allowed.removeAll { $0 == AppDelegate.clockBundleID } }
+            if hideControlCenter { allowed.removeAll { $0 == AppDelegate.ccBundleID } }
 
-        barHider.activate(withAllowedBundleIDs: allowed, allowedSystemItems: []) { [self] success, _ in
-            if !success {
-                currentStep = prevStep
-                updateSeparatorVisibility()
-                updateDotColor()
-                updateContextMenuTitle()
-                collapseViaLengthPush()
+            barHider.activate(withAllowedBundleIDs: allowed, allowedSystemItems: sysItems) { [self] success, _ in
+                if !success {
+                    currentStep = prevStep
+                    updateSeparatorVisibility()
+                    updateDotColor()
+                    updateContextMenuTitle()
+                    collapseViaLengthPush()
+                }
             }
         }
     }
